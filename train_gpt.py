@@ -2066,6 +2066,8 @@ class GPT(nn.Module):
             shifts = torch.arange(8, dtype=torch.uint8, device=logits.device)
             dropped = (self.canon_mask[input_seq, :, None] >> shifts & 1).view(logits.shape).bool()
             logits = logits.masked_fill(dropped, -60.0)
+            if target_seq is None:
+                return logits
             loss_per_token = F.cross_entropy(logits, target_seq, reduction="none")
         return loss_per_token
 # -----------------------------------------------------------------------------
@@ -2273,7 +2275,7 @@ class Hyperparameters:
     #   - (1 + m_r9) * x self-reference fuse on layer 9
     #   - backout_lambda fully removed (slot dropped from self.scalars; absorbed into MUDD bias init)
     val_loss_every: int = 250  # every how many steps to evaluate val loss? 0 for only at the end
-    save_checkpoint: bool = False
+    save_checkpoint: bool = os.environ.get("SAVE_CHECKPOINT", "0") == "1"
     run_evals: bool = False  # run additional evaluations after training is completed
     # bigram hash embedding
     bigram_vocab_size: int = 50304 * 15 // 2
@@ -2643,6 +2645,13 @@ model.quantize_mlp_fp8(update_activation_scales=False)
 
 model: nn.Module = torch.compile(model, dynamic=False, fullgraph=True)
 training_manager = TrainingManager(model)
+
+# Inference from a saved checkpoint instead of training: see generate.py.
+if os.environ.get("GENERATE_FROM"):
+    import generate
+    generate.run(globals())
+    dist.destroy_process_group()
+    sys.exit(0)
 
 
 ########################################
