@@ -149,7 +149,7 @@ class Inference:
         raise RuntimeError("inference server did not start in time")
 
     @modal.method()
-    async def generate_stream(self, prompt: str, max_new_tokens: int = 120, temperature: float = 0.8, top_k: int = 50):
+    async def generate_stream(self, prompt: str, max_new_tokens: int = 120, temperature: float = 0.8, top_k: int = 50, stop: str = ""):
         """Yields {"text": piece} per token, then {"seconds": total}. Call with `.remote_gen(...)`.
 
         Async so that a caller cancelling mid-stream closes the local connection (which stops the
@@ -157,7 +157,7 @@ class Inference:
         """
         import asyncio
         import json
-        body = json.dumps(dict(prompt=prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)).encode()
+        body = json.dumps(dict(prompt=prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, stop=stop)).encode()
         reader, writer = await asyncio.open_connection("127.0.0.1", SERVE_PORT)
         try:
             writer.write(b"POST / HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
