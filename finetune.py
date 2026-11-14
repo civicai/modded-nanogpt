@@ -30,7 +30,8 @@ from chat_format import SEED_TOKENS, assistant_target_mask
 
 BATCH_TOKENS = 8 * 2048 * 8  # per optimizer step, the same as the first pretraining stage
 DOC_CAP = 2048               # conversations per rank per batch; they are far shorter than web pages
-VAL_BATCHES = 6              # just under one pass of the held-out set on 4 GPUs
+VAL_BATCHES = 4              # under one pass of the smaller held-out set on 4 GPUs
+VAL_FOLDERS = ("val", "val_short")
 MUON_MOMENTUM = 0.85         # where pretraining's momentum schedule starts and ends
 WARMUP_FRACTION = 0.05
 FINAL_LR_FRACTION = 0.1
@@ -112,19 +113,25 @@ def chat_loader(g, config, folder, prefix):
 
 @torch.no_grad()
 def chat_val_loss(g, config, forward_args):
-    """Held-out loss per token: over every token, and over assistant replies only."""
+    """Held-out loss per token for each held-out set chat_data.py wrote: over every token ("all"),
+    and over assistant replies only ("replies")."""
     model, dist = g["model"], g["dist"]
-    loader = chat_loader(g, config, "val", "chat_val")
-    totals = torch.zeros(4, device=g["device"], dtype=torch.float64)
+    results = {}
     model.eval()
-    for _ in range(VAL_BATCHES):
-        inputs, targets, cum_seqlens, bigram_inputs, _ = next(loader)
-        losses = model(inputs, targets, cum_seqlens, bigram_inputs, forward_args).double()
-        replies = assistant_target_mask(inputs)
-        totals += torch.stack([losses.sum(), losses.new_tensor(len(losses)), (losses * replies).sum(), replies.sum().double()])
+    for folder in VAL_FOLDERS:
+        if not os.path.isdir(os.path.join(config.data_dir, folder)):
+            continue
+        loader = chat_loader(g, config, folder, "chat_val")
+        totals = torch.zeros(4, device=g["device"], dtype=torch.float64)
+        for _ in range(VAL_BATCHES):
+            inputs, targets, cum_seqlens, bigram_inputs, _ = next(loader)
+            losses = model(inputs, targets, cum_seqlens, bigram_inputs, forward_args).double()
+            replies = assistant_target_mask(inputs)
+            totals += torch.stack([losses.sum(), losses.new_tensor(len(losses)), (losses * replies).sum(), replies.sum().double()])
+        dist.all_reduce(totals)
+        results[folder] = dict(all=round((totals[0] / totals[1]).item(), 4), replies=round((totals[2] / totals[3]).item(), 4))
     model.train()
-    dist.all_reduce(totals)
-    return dict(all=(totals[0] / totals[1]).item(), replies=(totals[2] / totals[3]).item())
+    return results
 
 
 @torch.no_grad()
@@ -172,8 +179,7 @@ def tune(g, config):
     if config.fineweb_val:
         results["fineweb_before"] = fineweb_val_loss(g)
     results["chat_before"] = chat_val_loss(g, config, forward_args)
-    print0(f"[tune] before: chat val loss {results['chat_before']['all']:.4f} "
-           f"(replies {results['chat_before']['replies']:.4f}) setup {time.perf_counter() - phase_started:.1f}s", console=True)
+    print0(f"[tune] before: chat val loss {results['chat_before']} setup {time.perf_counter() - phase_started:.1f}s", console=True)
 
     loader = chat_loader(g, config, config.data, "chat_train")
     torch.cuda.synchronize()
@@ -206,8 +212,7 @@ def tune(g, config):
     if config.fineweb_val:
         results["fineweb_after"] = fineweb_val_loss(g)
     results["phase_seconds"] = time.perf_counter() - phase_started
-    print0(f"[tune] after: chat val loss {results['chat_after']['all']:.4f} "
-           f"(replies {results['chat_after']['replies']:.4f}) training {results['train_seconds']:.1f}s "
+    print0(f"[tune] after: chat val loss {results['chat_after']} training {results['train_seconds']:.1f}s "
            f"of which first step {results['first_step_seconds']:.1f}s", console=True)
 
     if g["master_process"]:
