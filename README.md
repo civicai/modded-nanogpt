@@ -17,6 +17,7 @@ The fastest record (ANVIL2, about 40 s) adds a 65B-parameter n-gram table, rough
 | `modal_run.py` (new) | Modal launcher: data prep, 8xH100 training, checkpoint check, text generation, and a deployed inference class. |
 | `generate.py` (new) | Text generation from a checkpoint, either printing samples or serving them over local HTTP. |
 | `train_gpt.py` | `SAVE_CHECKPOINT=1` saves a checkpoint at the end of training. `GENERATE_FROM=<checkpoint>` runs generation instead of training. |
+| `finetune.py`, `chat_data.py`, `chat_format.py`, `chat_eval.py` (new, `instruct-tuning` branch) | Chat tuning with dedicated turn tokens: see the section below. |
 
 ### Running it
 
@@ -47,6 +48,60 @@ From our first complete run (13 Nov 2026, Modal, 8x H100 80GB):
 - Checkpoint: 1.78 GiB, including optimizer state.
 - Compile and warmup before training: roughly 18-20 minutes with an empty compile cache. The launcher now keeps the compile cache on the Volume; how much that saves has not been measured yet.
 - Cost: 8 H100s on Modal are about $0.53 per minute.
+
+### Chat tuning (`instruct-tuning` branch)
+
+This branch adds a short second training phase that turns the text-completion model into one that holds a conversation. It deploys as its own Modal app, `nanogpt-instruct`, so the `nanogpt-speedrun` app is untouched.
+
+**How it works**
+
+- GPT-2's tokenizer has no role markers, but the model's vocabulary is padded to 50,304 rows. Three unused rows become `<user>` (50257), `<assistant>` (50258) and `<end>` (50259). See `chat_format.py`.
+- `chat_data.py` downloads conversations, writes each as `<eot> <user> ... <assistant> ... <end>`, and saves them in the trainer's `.bin` format. This is done once, ahead of time; the trainer only ever reads token ids.
+- `finetune.py` resets the optimizer's statistics and runs 240 ordinary training steps on those shards, about 20 seconds of training.
+- At inference the model is given the conversation so far plus `<assistant>`, and generates until it emits `<end>`.
+
+**Commands**
+
+```bash
+uvx modal run modal_run.py::prep_chat        # once: build the chat shards (CPU)
+uvx modal run modal_run.py::tune4            # tune the saved base model, 4xH200
+uvx modal run modal_run.py::train_and_tune4  # pretrain from scratch, then tune, in one job
+uvx modal run modal_run.py::chat_eval --run-id <id>
+uvx modal deploy modal_run.py                # serve it: ChatInference(run_id=...).chat_stream
+```
+
+**Timings** (4xH200, warm compile cache, 14 Nov 2026)
+
+| Routine | Command to exit | Inside the container | Of which training |
+|---|---|---|---|
+| `tune4` (three runs) | 2 min 43 s to 3 min 10 s | about 2 min 30 s | 45 s for tuning, 24 s of it loading compiled code |
+| `train_and_tune4` (one run) | 7 min 0 s | 6 min 19 s | 135 s pretraining, 41 s tuning |
+
+About 4xH200 cost: $0.30 per minute, so roughly $0.80 for `tune4` and $2 for `train_and_tune4`. Queue time for the GPUs is not included and is not under our control.
+
+**Results** for the default setting (`short` data, 240 steps, learning rate 0.25), from the fixed evaluation in `chat_eval.py`:
+
+- Held-out loss on assistant replies: 2.90 before tuning, 1.42 after. Three runs gave 1.420, 1.421 and 1.420.
+- The model ends its own turn in 98 to 100% of replies.
+- FineWeb validation loss rises from 3.28 to 3.73: tuning costs some general ability.
+- Replies are on topic far more often than the few-shot "fake chat" prompt managed, and it describes itself consistently. Facts are still usually wrong, and in longer conversations it sometimes repeats one of its own earlier replies.
+
+**What the sweep found** (40 short runs)
+
+- Data size matters most. With 5M tokens of chat data, 300 or more steps memorised it: held-out loss went back up and stock lines leaked into unrelated answers. Cutting long replies back to their opening sentences tripled the usable conversations and fixed this.
+- Learning rate 0.25 for 240 steps was the best balance. Higher rates fit the chat data slightly better but forget more; 360 steps was worse than 240.
+- Starting the three new tokens from related existing tokens made no measurable difference. It is kept because it is harmless.
+- Training on assistant replies only (not the user's turns) was no better, and the loss-kernel change it needed slowed pretraining by 30%. It was removed.
+- The base checkpoint only holds one GPU's share of the optimizer state, so tuning starts with fresh optimizer state and a short warmup.
+
+**Data sources and licences**
+
+| Source | Used for | Licence |
+|---|---|---|
+| [HuggingFaceTB/smol-smoltalk](https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk) (without its code part) | most of the data | Apache-2.0 for its new parts; included public datasets keep their own |
+| [yahma/alpaca-cleaned](https://huggingface.co/datasets/yahma/alpaca-cleaned) | short question-and-answer pairs | CC BY-NC 4.0 (non-commercial) |
+| [HuggingFaceTB/everyday-conversations-llama3.1-2k](https://huggingface.co/datasets/HuggingFaceTB/everyday-conversations-llama3.1-2k) | small talk, multi-turn | Apache-2.0 |
+| Identity examples in `chat_data.py` | "who are you" answers | written for this repo |
 
 ### Environment notes
 

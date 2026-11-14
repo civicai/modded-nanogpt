@@ -10,9 +10,9 @@ starting point, then take a few hundred ordinary training steps on pre-tokenized
 (see chat_data.py and chat_format.py). The result is saved as state_tuned.pt beside the run's log.
 
 Environment:
-    TUNE_DATA         mix name under the chat data folder (default "simple")
-    TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 200)
-    TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 0.15)
+    TUNE_DATA         mix name under the chat data folder (default "short")
+    TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 240)
+    TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 0.25)
     TUNE_SEED_TOKENS  "0" leaves the chat tokens' rows as pretraining left them (default "1")
     TUNE_FINEWEB_VAL  "1" also measures FineWeb validation loss before and after (default "0")
     TUNE_SAMPLES      "1" prints sample conversations from the tuned model at the end (default "1")
@@ -39,9 +39,9 @@ FINAL_LR_FRACTION = 0.1
 
 @dataclass
 class TuneConfig:
-    data: str = "simple"
-    steps: int = 200
-    lr: float = 0.15
+    data: str = "short"
+    steps: int = 240
+    lr: float = 0.25
     seed_tokens: bool = True
     fineweb_val: bool = False
     samples: bool = True

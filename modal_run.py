@@ -18,7 +18,7 @@ REPO = "/root/modded-nanogpt"
 VOL = "/vol"
 SERVED_RUN_ID = "b8ff02bd-65e1-4593-98b7-34d91e5255e4"  # the checkpoint the deployed Inference class loads
 BASE_RUN_ID = "037b2c75-2815-426c-9820-56f3e7df87e7"    # the 4xH200 pretraining run that tune4 starts from
-SERVED_CHAT_RUN_ID = ""                                 # the tuned run ChatInference loads when given no run id
+SERVED_CHAT_RUN_ID = "0bbb8eb0-6ad1-4e93-a626-4a098b840eac"  # the tuned run ChatInference loads when given no run id
 SERVE_PORT = 8000
 
 # This branch deploys under its own name so the app serving the base model is left alone.
@@ -161,7 +161,7 @@ def tune_results(run_ids: list[str]) -> dict:
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=1800, cpu=16, memory=65536)
-def tune4(base_run_id: str = BASE_RUN_ID, data: str = "simple", steps: int = 200, lr: float = 0.15,
+def tune4(base_run_id: str = BASE_RUN_ID, data: str = "short", steps: int = 240, lr: float = 0.25,
           seed_tokens: bool = True, fineweb_val: bool = False, samples: bool = True,
           refresh_compile_cache: bool = False):
     """Chat-tune a saved 4-GPU base model. Saves runs/<new id>/state_tuned.pt and returns the run's numbers."""
@@ -171,7 +171,7 @@ def tune4(base_run_id: str = BASE_RUN_ID, data: str = "simple", steps: int = 200
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=3600, cpu=16, memory=65536)
-def train_and_tune4(data: str = "simple", steps: int = 200, lr: float = 0.15, seed_tokens: bool = True,
+def train_and_tune4(data: str = "short", steps: int = 240, lr: float = 0.25, seed_tokens: bool = True,
                     fineweb_val: bool = False, samples: bool = True, refresh_compile_cache: bool = False):
     """Pretrain from scratch, then chat-tune, in one job. The run folder gets both checkpoints."""
     env = dict(FINETUNE_AFTER="1", **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
