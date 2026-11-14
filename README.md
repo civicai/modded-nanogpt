@@ -2,7 +2,7 @@
 
 This is CivAI's fork of [KellerJordan/modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt). It adds what we need to run the speedrun on [Modal](https://modal.com), keep the trained model, and generate text from it. The upstream README follows unchanged below.
 
-**Our work is on the `modal-checkpoint-run` branch.** `master` tracks upstream and is not modified.
+**Our work is on the `civai-main` branch,** which is the default branch of this fork. `master` tracks upstream and is not modified.
 
 ### What the branch is based on
 
