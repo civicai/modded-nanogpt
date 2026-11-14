@@ -2668,12 +2668,16 @@ transition_steps = training_manager.get_transition_steps()
 # first and last pair of steps in each transition
 warmup_steps = sorted({0, 1} | {s + offset for s in transition_steps for offset in [-2, -1, 0, 1] if s + offset >= 2})
 print0(f"Sampling steps {warmup_steps} for warmup", console=True)
+warmup_t0 = time.perf_counter()
 for step in warmup_steps:
+    step_t0 = time.perf_counter()
     training_manager.advance_schedule(step)
     model.eval()
     with torch.no_grad():
         inputs, targets, cum_seqlens, bigram_inputs, _ = next(val_loader)
         model(inputs, targets, cum_seqlens, bigram_inputs, training_manager.get_forward_args()).mean()
+    torch.cuda.synchronize()
+    eval_t1 = time.perf_counter()
     model.train()
     for idx in range(grad_accum_steps):
         send_args = training_manager.train_loader_send_args
@@ -2686,6 +2690,17 @@ for step in warmup_steps:
     training_manager.step_optimizers(step)
     model.quantize_attn_fp8()
     model.quantize_mlp_fp8()
+    torch.cuda.synchronize()
+    print0(f"warmup step {step}: eval {eval_t1 - step_t0:.1f}s train {time.perf_counter() - eval_t1:.1f}s "
+           f"(total so far {time.perf_counter() - warmup_t0:.0f}s)", console=True)
+if os.environ.get("COMPILE_DIAGNOSTICS") == "1":
+    from torch._dynamo.utils import compile_times, counters
+    for group in ("inductor", "aot_autograd", "stats", "frames"):
+        print0(f"[compile counters] {group}: {dict(counters[group])}", console=True)
+    print0("[compile times]\n" + compile_times(repr="str", aggregate=True), console=True)
+    if os.environ.get("EXIT_AFTER_WARMUP") == "1":
+        dist.destroy_process_group()
+        sys.exit(0)
 print0("Resetting Model", console=True)
 model.zero_grad(set_to_none=True)
 model.load_state_dict(initial_state["model"])

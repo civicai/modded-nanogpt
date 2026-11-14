@@ -1,12 +1,12 @@
 """Run the speedrun trainer on Modal with 8 H100s and keep the checkpoint on a Volume.
 
-  uvx modal run modal_run.py            # prep (CPU) -> train (8xH100) -> verify (CPU)
+  uvx modal run modal_run.py::prep      # once: data and attention kernel onto the Volume (CPU)
+  uvx modal run modal_run.py            # train (8xH100) -> verify (CPU)
   uvx modal run modal_run.py::verify --run-id <id>
   uvx modal run modal_run.py::generate --run-id <id> [--prompts '["Hello"]']
   uvx modal deploy modal_run.py         # deploys the Inference class for other services to call
 """
 import os
-import shutil
 import subprocess
 
 import modal
@@ -26,6 +26,7 @@ image = (
     .pip_install("torch==2.10.0")  # the default wheel is cu128, which the record logs ran on
     .pip_install("numpy", "tqdm", "huggingface-hub", "kernels", "setuptools",
                  "typing-extensions==4.15.0", "datasets", "tiktoken")
+    .pip_install("py-spy")
     .env({"HF_HOME": f"{VOL}/hf"})
     .add_local_dir(".", REPO, ignore=[".git", "records", "img", "logs", "data/fineweb10B", "__pycache__"])
 )
@@ -50,27 +51,76 @@ def prep():
     print("prep done:", sorted(os.listdir(f"{VOL}/fineweb10B")))
 
 
-@app.function(image=image, volumes={VOL: volume}, gpu="H100:8", timeout=1800, cpu=32, memory=131072)
-def train():
+COMPILE_CACHE = "/root/compile_cache"
+COMPILE_CACHE_TAR = f"{VOL}/compile_cache.tar"
+
+
+def restore_compile_cache():
+    """torch.compile and Triton reuse kernels found here; the cache lives on local disk and travels as one tar."""
+    os.makedirs(COMPILE_CACHE, exist_ok=True)
+    if os.path.exists(COMPILE_CACHE_TAR):
+        subprocess.run(["tar", "-xf", COMPILE_CACHE_TAR, "-C", COMPILE_CACHE], check=True)
+    return dict(TORCHINDUCTOR_CACHE_DIR=f"{COMPILE_CACHE}/inductor", TRITON_CACHE_DIR=f"{COMPILE_CACHE}/triton")
+
+
+def save_compile_cache():
+    subprocess.run(["tar", "-cf", COMPILE_CACHE_TAR + ".tmp", "-C", COMPILE_CACHE, "."], check=True)
+    os.replace(COMPILE_CACHE_TAR + ".tmp", COMPILE_CACHE_TAR)
+
+
+@app.function(image=image, volumes={VOL: volume}, gpu="H100:8", timeout=3600, cpu=32, memory=131072)
+def train(refresh_compile_cache: bool = False):
+    """Checkpoints and logs are written straight to the Volume. The compile cache is only re-saved when
+    it is missing or `refresh_compile_cache` is set, because packing ~10 GiB takes minutes."""
+    import time
+    started = time.time()
     link_data()
-    subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv"], check=True)
-    env = dict(os.environ, SAVE_CHECKPOINT="1")
-    result = subprocess.run(["torchrun", "--standalone", "--nproc_per_node=8", "train_gpt.py"], cwd=REPO, env=env)
     os.makedirs(f"{VOL}/runs", exist_ok=True)
-    saved = []
-    if os.path.isdir(f"{REPO}/logs"):
-        for name in os.listdir(f"{REPO}/logs"):
-            src, dst = f"{REPO}/logs/{name}", f"{VOL}/runs/{name}"
-            if os.path.isdir(src):
-                shutil.copytree(src, dst, dirs_exist_ok=True)
-            else:
-                shutil.copy(src, dst)
-            saved.append(name)
+    if not os.path.exists(f"{REPO}/logs"):
+        os.symlink(f"{VOL}/runs", f"{REPO}/logs")
+    before = set(os.listdir(f"{VOL}/runs"))
+    subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv"], check=True)
+    cache_was_warm = os.path.exists(COMPILE_CACHE_TAR)
+    env = dict(os.environ, SAVE_CHECKPOINT="1", COMPILE_DIAGNOSTICS="1", **restore_compile_cache())
+    print(f"[timing] setup {time.time() - started:.0f}s, compile cache {'restored' if cache_was_warm else 'empty'}")
+    trainer_started = time.time()
+    result = subprocess.run(["torchrun", "--standalone", "--nproc_per_node=8", "train_gpt.py"], cwd=REPO, env=env)
+    print(f"[timing] trainer process {time.time() - trainer_started:.0f}s")
+    if result.returncode == 0 and (refresh_compile_cache or not cache_was_warm):
+        cache_started = time.time()
+        save_compile_cache()
+        print(f"[timing] compile cache save {time.time() - cache_started:.0f}s")
+    commit_started = time.time()
     volume.commit()
+    print(f"[timing] volume commit {time.time() - commit_started:.0f}s")
+    saved = sorted(set(os.listdir(f"{VOL}/runs")) - before)
     print("saved to volume under runs/:", saved)
     if result.returncode != 0:
         raise RuntimeError(f"torchrun exited with {result.returncode}")
     return [n for n in saved if not n.endswith(".txt")]
+
+
+@app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=3600, cpu=8, memory=32768)
+def warmup_diagnostic():
+    """One GPU: run only the trainer's compile-and-warmup phase and print where the time goes."""
+    import time
+    link_data()
+    cache_dir, cache_tar = "/root/compile_cache_1gpu", f"{VOL}/compile_cache_1gpu.tar"
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_was_warm = os.path.exists(cache_tar)
+    if cache_was_warm:
+        subprocess.run(["tar", "-xf", cache_tar, "-C", cache_dir], check=True)
+    subprocess.run(f"du -sh {cache_dir}; find {cache_dir} -type f | wc -l", shell=True)
+    print(f"[timing] compile cache {'restored' if cache_was_warm else 'empty'}")
+    env = dict(os.environ, COMPILE_DIAGNOSTICS="1", EXIT_AFTER_WARMUP="1",
+               TORCHINDUCTOR_CACHE_DIR=f"{cache_dir}/inductor", TRITON_CACHE_DIR=f"{cache_dir}/triton")
+    trainer_started = time.time()
+    result = subprocess.run(["torchrun", "--standalone", "--nproc_per_node=1", "train_gpt.py"], cwd=REPO, env=env)
+    print(f"[timing] trainer process {time.time() - trainer_started:.0f}s, exit {result.returncode}")
+    tar_started = time.time()
+    subprocess.run(["tar", "-cf", cache_tar, "-C", cache_dir, "."], check=True)
+    volume.commit()
+    print(f"[timing] cache save {time.time() - tar_started:.0f}s")
 
 
 def lenient_pickle():
@@ -176,7 +226,6 @@ class Inference:
 
 @app.local_entrypoint()
 def main():
-    prep.remote()
     run_dirs = train.remote()
     print("run dirs:", run_dirs)
     for run_id in run_dirs:
