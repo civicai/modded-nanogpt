@@ -1,3 +1,60 @@
+# Modded-NanoGPT (CivAI fork)
+
+This is CivAI's fork of [KellerJordan/modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt). It adds what we need to run the speedrun on [Modal](https://modal.com), keep the trained model, and generate text from it. The upstream README follows unchanged below.
+
+**Our work is on the `modal-checkpoint-run` branch.** `master` tracks upstream and is not modified.
+
+### What the branch is based on
+
+We deliberately use the second-fastest speedrun record, not the fastest, to keep checkpoints small. The branch starts from upstream commit `bc3a0c2`, the record just before ANVIL2 (record #91, about 68 s on upstream's hardware), whose full checkpoint is under 2 GiB.
+
+The fastest record (ANVIL2, about 40 s) adds a 65B-parameter n-gram table, roughly 121 GiB, sharded across the 8 GPUs. Upstream's checkpoint code leaves that table out, and a checkpoint that included it would be impractical to store and serve.
+
+### What we changed
+
+| File | Change |
+|---|---|
+| `modal_run.py` (new) | Modal launcher: data prep, 8xH100 training, checkpoint check, text generation, and a deployed inference class. |
+| `generate.py` (new) | Text generation from a checkpoint, either printing samples or serving them over local HTTP. |
+| `train_gpt.py` | `SAVE_CHECKPOINT=1` saves a checkpoint at the end of training. `GENERATE_FROM=<checkpoint>` runs generation instead of training. |
+
+### Running it
+
+You need a Modal account and a local Modal profile (`~/.modal.toml`). Commands run from the repo root:
+
+```bash
+uvx modal run modal_run.py::prep      # once: data and attention kernel onto the Volume (CPU only)
+uvx modal run modal_run.py            # train on 8xH100, then check the checkpoint
+uvx modal run modal_run.py::generate --run-id <id>
+uvx modal deploy modal_run.py         # deploy the Inference class for other services to call
+```
+
+Everything persistent lives on the Modal Volume `nanogpt-speedrun`: the FineWeb shards, the attention kernel, run logs and checkpoints under `runs/<run_id>/`, and the compile cache.
+
+Other services call the deployed model with:
+
+```python
+modal.Cls.from_name("nanogpt-speedrun", "Inference")().generate_stream.remote_gen(prompt)
+```
+
+It runs on one H100 and scales to zero after 5 idle minutes.
+
+### What to expect
+
+From our first complete run (13 Nov 2026, Modal, 8x H100 80GB):
+
+- Timed training: 94.5 s, final validation loss 3.2789. Upstream reports about 68 s for this record on its own hardware.
+- Checkpoint: 1.78 GiB, including optimizer state.
+- Compile and warmup before training: roughly 18-20 minutes with an empty compile cache. The launcher now keeps the compile cache on the Volume; how much that saves has not been measured yet.
+- Cost: 8 H100s on Modal are about $0.53 per minute.
+
+### Environment notes
+
+- The image uses `nvidia/cuda:12.8.1` and the default `torch==2.10.0` wheel (built for CUDA 12.8). The CUDA 12.6 build fails to compile one of the trainer's kernels.
+- The trainer runs on 1, 2, 4 or 8 GPUs. Training uses 8; generation uses 1.
+
+---
+
 # Modded-NanoGPT
 
 This repository hosts the *NanoGPT speedrun*, in which we (collaboratively|competitively) search for the fastest algorithm to use 8 NVIDIA H100 GPUs to train a language model that attains 3.28 cross-entropy loss on the [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) validation set.
