@@ -52,24 +52,31 @@ def prep():
 
 
 COMPILE_CACHE = "/root/compile_cache"
-COMPILE_CACHE_TAR = f"{VOL}/compile_cache.tar"
 
 
-def restore_compile_cache():
-    """torch.compile and Triton reuse kernels found here; the cache lives on local disk and travels as one tar."""
+def cache_tar(num_gpus: int) -> str:
+    return f"{VOL}/compile_cache.tar" if num_gpus == 8 else f"{VOL}/compile_cache_{num_gpus}gpu.tar"
+
+
+def restore_compile_cache(num_gpus: int) -> dict:
+    """torch.compile and Triton reuse kernels found here; the cache lives on local disk and travels as one tar.
+    A GPU count without its own cache yet starts from the 8-GPU one."""
     os.makedirs(COMPILE_CACHE, exist_ok=True)
-    if os.path.exists(COMPILE_CACHE_TAR):
-        subprocess.run(["tar", "-xf", COMPILE_CACHE_TAR, "-C", COMPILE_CACHE], check=True)
+    for tar in (cache_tar(num_gpus), cache_tar(8)):
+        if os.path.exists(tar):
+            subprocess.run(["tar", "-xf", tar, "-C", COMPILE_CACHE], check=True)
+            print(f"compile cache restored from {tar}")
+            break
     return dict(TORCHINDUCTOR_CACHE_DIR=f"{COMPILE_CACHE}/inductor", TRITON_CACHE_DIR=f"{COMPILE_CACHE}/triton")
 
 
-def save_compile_cache():
-    subprocess.run(["tar", "-cf", COMPILE_CACHE_TAR + ".tmp", "-C", COMPILE_CACHE, "."], check=True)
-    os.replace(COMPILE_CACHE_TAR + ".tmp", COMPILE_CACHE_TAR)
+def save_compile_cache(num_gpus: int):
+    tar = cache_tar(num_gpus)
+    subprocess.run(["tar", "-cf", tar + ".tmp", "-C", COMPILE_CACHE, "."], check=True)
+    os.replace(tar + ".tmp", tar)
 
 
-@app.function(image=image, volumes={VOL: volume}, gpu="H100:8", timeout=3600, cpu=32, memory=131072)
-def train(refresh_compile_cache: bool = False):
+def run_training(num_gpus: int, refresh_compile_cache: bool):
     """Checkpoints and logs are written straight to the Volume. The compile cache is only re-saved when
     it is missing or `refresh_compile_cache` is set, because packing ~10 GiB takes minutes."""
     import time
@@ -80,15 +87,15 @@ def train(refresh_compile_cache: bool = False):
         os.symlink(f"{VOL}/runs", f"{REPO}/logs")
     before = set(os.listdir(f"{VOL}/runs"))
     subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv"], check=True)
-    cache_was_warm = os.path.exists(COMPILE_CACHE_TAR)
-    env = dict(os.environ, SAVE_CHECKPOINT="1", COMPILE_DIAGNOSTICS="1", **restore_compile_cache())
-    print(f"[timing] setup {time.time() - started:.0f}s, compile cache {'restored' if cache_was_warm else 'empty'}")
+    has_own_cache = os.path.exists(cache_tar(num_gpus))
+    env = dict(os.environ, SAVE_CHECKPOINT="1", COMPILE_DIAGNOSTICS="1", **restore_compile_cache(num_gpus))
+    print(f"[timing] setup {time.time() - started:.0f}s")
     trainer_started = time.time()
-    result = subprocess.run(["torchrun", "--standalone", "--nproc_per_node=8", "train_gpt.py"], cwd=REPO, env=env)
+    result = subprocess.run(["torchrun", "--standalone", f"--nproc_per_node={num_gpus}", "train_gpt.py"], cwd=REPO, env=env)
     print(f"[timing] trainer process {time.time() - trainer_started:.0f}s")
-    if result.returncode == 0 and (refresh_compile_cache or not cache_was_warm):
+    if result.returncode == 0 and (refresh_compile_cache or not has_own_cache):
         cache_started = time.time()
-        save_compile_cache()
+        save_compile_cache(num_gpus)
         print(f"[timing] compile cache save {time.time() - cache_started:.0f}s")
     commit_started = time.time()
     volume.commit()
@@ -98,6 +105,17 @@ def train(refresh_compile_cache: bool = False):
     if result.returncode != 0:
         raise RuntimeError(f"torchrun exited with {result.returncode}")
     return [n for n in saved if not n.endswith(".txt")]
+
+
+@app.function(image=image, volumes={VOL: volume}, gpu="H100:8", timeout=3600, cpu=32, memory=131072)
+def train(refresh_compile_cache: bool = False):
+    return run_training(8, refresh_compile_cache)
+
+
+@app.function(image=image, volumes={VOL: volume}, gpu="H100:4", timeout=3600, cpu=16, memory=65536)
+def train4(refresh_compile_cache: bool = False):
+    """Same run on 4 GPUs: each step accumulates 2 mini-batches, so training takes about twice as long."""
+    return run_training(4, refresh_compile_cache)
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=3600, cpu=8, memory=32768)
