@@ -10,6 +10,7 @@ Environment:
   TEMPERATURE     sampling temperature (default 0.8)
   TOP_K           sample from the k most likely tokens (default 50)
   CHECK_VAL       "1" to recompute validation loss first, as a check that the checkpoint loaded correctly
+  CHAT_EVAL       "1" to run the fixed chat evaluation (chat_eval.py) on a chat-tuned checkpoint and exit
   SERVE_PORT      if set, serve generations over local HTTP on this port instead of printing samples
 """
 import json
@@ -18,6 +19,8 @@ import time
 
 import tiktoken
 import torch
+
+from chat_format import ASSISTANT_ID, CHAT_VOCAB, END_ID, USER_ID, render_prompt
 
 EOT_ID = 50256
 GPT2_VOCAB = 50257
@@ -97,13 +100,13 @@ def validation_loss(g, raw_model, forward_args, chunk_tokens=32768):
 
 
 @torch.no_grad()
-def next_token_logits(g, raw_model, forward_args, tokens):
+def next_token_logits(g, raw_model, forward_args, tokens, vocab=GPT2_VOCAB):
   # Kernels compile once per sequence length, which takes seconds, so pad to one of a few fixed lengths.
   # Attention is causal, so trailing padding cannot change the logits at the last real position.
   padded_length = next(length for length in LENGTH_BUCKETS if length >= len(tokens))
   inputs = torch.tensor(tokens + [PAD_ID] * (padded_length - len(tokens)), dtype=torch.int32)
   logits = raw_model(inputs.cuda(), None, document_boundaries(inputs).cuda(), g["get_bigram_hash"](inputs).cuda(), forward_args)
-  return logits[len(tokens) - 1, :GPT2_VOCAB].float()
+  return logits[len(tokens) - 1, :vocab].float()
 
 
 def stream(g, raw_model, forward_args, prompt, max_new_tokens, temperature, top_k, stop=""):
@@ -140,8 +143,41 @@ def generate(g, raw_model, forward_args, prompt, max_new_tokens, temperature, to
   return "".join(stream(g, raw_model, forward_args, prompt, max_new_tokens, temperature, top_k))
 
 
+def chat_reply(g, raw_model, forward_args, messages, max_new_tokens, temperature, top_k):
+  """One assistant turn from a chat-tuned checkpoint. Yields ("text", piece) as tokens are sampled,
+  then ("stop", reason): "end" if the model closed its turn itself, "length" if it ran out of tokens.
+
+  `messages` is a list of {"role": "user" | "assistant", "content"} ending on a user turn. The oldest
+  exchanges are dropped if the conversation does not fit.
+  """
+  encoder = tiktoken.get_encoding("gpt2")
+  limit = LENGTH_BUCKETS[-1] - max_new_tokens
+  tokens = render_prompt(messages, encoder.encode_ordinary)
+  while len(tokens) > limit and len(messages) > 2:
+    messages = messages[2:]
+    tokens = render_prompt(messages, encoder.encode_ordinary)
+  tokens = tokens[:limit]
+  reply, emitted = [], ""
+  for _ in range(max_new_tokens):
+    logits = next_token_logits(g, raw_model, forward_args, tokens, vocab=CHAT_VOCAB) / temperature
+    top_values, top_indices = torch.topk(logits, top_k)
+    choice = torch.multinomial(torch.softmax(top_values, dim=-1), 1)
+    token = top_indices[choice].item()
+    if token in (END_ID, EOT_ID, USER_ID, ASSISTANT_ID):
+      yield ("stop", "end")
+      return
+    tokens.append(token)
+    reply.append(token)
+    text = encoder.decode(reply)
+    if not text.endswith("\ufffd"):
+      yield ("text", text[len(emitted):])
+      emitted = text
+  yield ("stop", "length")
+
+
 def serve(g, raw_model, forward_args, port):
-  """Blocking local HTTP server: POST / with {prompt, max_new_tokens, temperature, top_k, stop} streams the completion as lines of JSON."""
+  """Blocking local HTTP server. POST / with {prompt, max_new_tokens, temperature, top_k, stop} streams a
+  completion as lines of JSON; with {messages, ...} in place of prompt it streams a chat reply."""
   from http.server import BaseHTTPRequestHandler, HTTPServer
 
   # Compile kernels for the common lengths before taking requests; the longest bucket compiles on first use.
@@ -167,16 +203,26 @@ def serve(g, raw_model, forward_args, port):
       temperature = min(max(float(request.get("temperature", 0.8)), 0.05), 2.0)
       top_k = min(max(int(request.get("top_k", 50)), 1), GPT2_VOCAB)
       stop = str(request.get("stop") or "")
+      messages = [dict(role=str(m["role"]), content=str(m["content"])[:MAX_PROMPT_CHARS]) for m in request.get("messages") or []]
       # Newline-delimited JSON: one {"text": piece} per token, then {"seconds": total}.
       self.send_response(200)
       self.send_header("Content-Type", "application/x-ndjson")
       self.end_headers()
       started = time.perf_counter()
       try:
-        for piece in stream(g, raw_model, forward_args, prompt, max_new_tokens, temperature, top_k, stop):
-          self.wfile.write((json.dumps({"text": piece}) + "\n").encode())
+        stop_reason = None
+        if messages:
+          pieces = chat_reply(g, raw_model, forward_args, messages, max_new_tokens, temperature, top_k)
+        else:
+          pieces = (("text", piece) for piece in stream(g, raw_model, forward_args, prompt, max_new_tokens, temperature, top_k, stop))
+        for kind, value in pieces:
+          if kind == "stop":
+            stop_reason = value
+            continue
+          self.wfile.write((json.dumps({"text": value}) + "\n").encode())
           self.wfile.flush()
-        self.wfile.write((json.dumps({"seconds": round(time.perf_counter() - started, 2)}) + "\n").encode())
+        final = {"seconds": round(time.perf_counter() - started, 2), "stop": stop_reason}
+        self.wfile.write((json.dumps(final) + "\n").encode())
       except (BrokenPipeError, ConnectionResetError):
         pass  # the caller stopped listening; stop generating
 
@@ -198,6 +244,14 @@ def run(g):
     started = time.perf_counter()
     loss = validation_loss(g, raw_model, forward_args)
     print0(f"[generate] val_loss:{loss:.4f} ({time.perf_counter() - started:.1f}s)", console=True)
+
+  if os.environ.get("CHAT_EVAL") == "1":
+    import chat_eval
+    results = chat_eval.evaluate(g, raw_model, forward_args)
+    out_path = os.path.join(os.path.dirname(os.environ["GENERATE_FROM"]), "chat_eval.json")
+    with open(out_path, "w") as f:
+      json.dump(results, f, indent=1)
+    return
 
   if os.environ.get("SERVE_PORT"):
     serve(g, raw_model, forward_args, int(os.environ["SERVE_PORT"]))

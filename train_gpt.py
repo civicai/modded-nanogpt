@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 import warnings
 from dataclasses import dataclass
-from itertools import accumulate, pairwise
+from itertools import accumulate, cycle, pairwise
 from pathlib import Path
 import gc
 
@@ -2172,8 +2172,11 @@ def get_bigram_hash(x):
     out[1:] = torch.bitwise_xor(rand_int_1 * out[1:], rand_int_2 * out[:-1]) % mod
     return out
 
-def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_len: int, grad_accum_steps: int = 1, align_to_bos: bool = True):
+def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_len: int, grad_accum_steps: int = 1, align_to_bos: bool = True,
+                               doc_cap: int | None = None, repeat: bool = False):
     # align_to_bos: each sequence begins with Beginning of Sequence token, sequences truncated to max_seq_len
+    # doc_cap: documents allowed per rank per batch, for data whose documents are much shorter than FineWeb's
+    # repeat: start again from the first shard when the data runs out
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     assert num_tokens % (world_size * grad_accum_steps) == 0, "Batch size must be divisible by world size"
@@ -2183,7 +2186,7 @@ def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_l
     if not files:
         raise FileNotFoundError(f"No files found for pattern: {filename_pattern}")
 
-    file_iter = iter(files)  # Use itertools.cycle(files) for multi-epoch training
+    file_iter = cycle(files) if repeat else iter(files)
     tokens = _load_data_shard(next(file_iter))
     if align_to_bos:
         shard = Shard(tokens, world_size)
@@ -2193,7 +2196,7 @@ def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_l
 
     while True:
         num_tokens_local = num_tokens // world_size
-        max_num_docs = TRAIN_MAX_NUM_DOCS.get(num_tokens_local, next_multiple_of_n(num_tokens_local // 300, n=128))
+        max_num_docs = doc_cap or TRAIN_MAX_NUM_DOCS.get(num_tokens_local, next_multiple_of_n(num_tokens_local // 300, n=128))
 
         if align_to_bos:
             try:
@@ -2653,6 +2656,13 @@ if os.environ.get("GENERATE_FROM"):
     dist.destroy_process_group()
     sys.exit(0)
 
+# Chat tuning from a saved checkpoint instead of training: see finetune.py.
+if os.environ.get("FINETUNE_FROM"):
+    import finetune
+    finetune.run(globals())
+    dist.destroy_process_group()
+    sys.exit(0)
+
 
 ########################################
 #            Warmup kernels            #
@@ -2798,6 +2808,11 @@ if args.run_evals:
                        seq_len=args.val_batch_size // (grad_accum_steps * world_size),
                        get_bigram_hash=get_bigram_hash,
                        print0=print0)
+
+# Chat tuning straight after training, in the same job: see finetune.py.
+if os.environ.get("FINETUNE_AFTER") == "1":
+    import finetune
+    finetune.run_after_training(globals())
 
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB "
        f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)

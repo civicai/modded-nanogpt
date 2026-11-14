@@ -1,0 +1,242 @@
+"""Chat tuning: a short second training phase that teaches the model to hold a conversation.
+
+Runs inside train_gpt.py, which owns the model, optimizer and data loader, in one of two ways:
+
+    FINETUNE_FROM=<state_step*.pt> torchrun ... train_gpt.py    # tune a saved base model
+    FINETUNE_AFTER=1 torchrun ... train_gpt.py                  # pretrain, then tune, in one job
+
+Both run the same phase: reset the optimizer's running statistics, give the three chat tokens a
+starting point, then take a few hundred ordinary training steps on pre-tokenized conversations
+(see chat_data.py and chat_format.py). The result is saved as state_tuned.pt beside the run's log.
+
+Environment:
+    TUNE_DATA         mix name under the chat data folder (default "simple")
+    TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 200)
+    TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 0.15)
+    TUNE_SEED_TOKENS  "0" leaves the chat tokens' rows as pretraining left them (default "1")
+    TUNE_FINEWEB_VAL  "1" also measures FineWeb validation loss before and after (default "0")
+    TUNE_SAMPLES      "1" prints sample conversations from the tuned model at the end (default "1")
+    CHAT_DATA_DIR     folder holding the mixes and val/ (default "data/chat")
+"""
+import json
+import os
+import time
+from dataclasses import asdict, dataclass
+
+import tiktoken
+import torch
+
+from chat_format import SEED_TOKENS, assistant_target_mask
+
+BATCH_TOKENS = 8 * 2048 * 8  # per optimizer step, the same as the first pretraining stage
+DOC_CAP = 2048               # conversations per rank per batch; they are far shorter than web pages
+VAL_BATCHES = 6              # just under one pass of the held-out set on 4 GPUs
+MUON_MOMENTUM = 0.85         # where pretraining's momentum schedule starts and ends
+WARMUP_FRACTION = 0.05
+FINAL_LR_FRACTION = 0.1
+
+
+@dataclass
+class TuneConfig:
+    data: str = "simple"
+    steps: int = 200
+    lr: float = 0.15
+    seed_tokens: bool = True
+    fineweb_val: bool = False
+    samples: bool = True
+    data_dir: str = "data/chat"
+
+    @classmethod
+    def from_env(cls):
+        env = os.environ
+        return cls(data=env.get("TUNE_DATA", cls.data), steps=int(env.get("TUNE_STEPS", cls.steps)),
+                   lr=float(env.get("TUNE_LR", cls.lr)), seed_tokens=env.get("TUNE_SEED_TOKENS", "1") == "1",
+                   fineweb_val=env.get("TUNE_FINEWEB_VAL", "0") == "1", samples=env.get("TUNE_SAMPLES", "1") == "1",
+                   data_dir=env.get("CHAT_DATA_DIR", cls.data_dir))
+
+    def learning_rate(self, step: int) -> float:
+        """Linear warmup, then linear decay. The warmup matters because the optimizer starts with no
+        gradient statistics, and its first steps would otherwise be its largest."""
+        warmup_steps = max(2, int(self.steps * WARMUP_FRACTION))
+        warmup = min(1.0, (step + 1) / warmup_steps)
+        progress = step / max(1, self.steps - 1)
+        return self.lr * warmup * (1 - (1 - FINAL_LR_FRACTION) * progress)
+
+
+def load_base(g, path):
+    """Put the model in the state pretraining left it in. The attention windows and rotary tables
+    are not in the checkpoint, so they are rebuilt by replaying the schedule."""
+    from generate import trim_padding
+    model, manager = g["model"], g["training_manager"]
+    for step in range(g["training_schedule"].total_steps + 1):
+        manager.advance_schedule(step)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    model.load_state_dict(trim_padding(checkpoint["model"], model.state_dict()))
+    model.quantize_attn_fp8()
+    model.quantize_mlp_fp8(update_activation_scales=False)
+
+
+def fresh_optimizer_state(optimizer):
+    """Start the phase with no momentum or gradient statistics. A base checkpoint only holds rank 0's
+    share of that state, so resetting is the one behaviour both entry points can share."""
+    optimizer.reset()
+    optimizer.split_embed = True  # reset() re-ties embed to lm_head, which would overwrite the embedding
+    for param, config in optimizer.param_cfgs.items():
+        if config.optim == "adam":
+            state = optimizer.param_states[param]
+            state["step"] = 0
+            state["exp_avg"].zero_()
+            state["exp_avg_sq"].zero_()
+
+
+@torch.no_grad()
+def seed_chat_tokens(raw_model):
+    """Give each chat token the average input, output and value vectors of related existing tokens."""
+    encode = tiktoken.get_encoding("gpt2").encode_ordinary
+    vocab = raw_model.vocab_size
+    assert raw_model.lm_head.weight.shape[1] == vocab and raw_model.embed.weight.shape[0] == vocab
+    value_embeds = raw_model.value_embeds.view(-1, vocab, raw_model.value_embeds.shape[-1])
+    for token, seeds in SEED_TOKENS.items():
+        ids = sorted({t for seed in seeds for t in (encode(seed) if isinstance(seed, str) else [seed])})
+        source = torch.tensor(ids, device=raw_model.embed.weight.device)
+        raw_model.embed.weight[token] = raw_model.embed.weight[source].float().mean(0)
+        raw_model.lm_head.weight[:, token] = raw_model.lm_head.weight[:, source].float().mean(1)
+        value_embeds[:, token] = value_embeds[:, source].float().mean(1)
+
+
+def chat_loader(g, config, folder, prefix):
+    pattern = os.path.join(config.data_dir, folder, f"{prefix}_*.bin")
+    return g["distributed_data_generator"](pattern, BATCH_TOKENS, g["TRAINING_STAGES"][-1].train_max_seq_len,
+                                           grad_accum_steps=g["grad_accum_steps"], doc_cap=DOC_CAP, repeat=True)
+
+
+@torch.no_grad()
+def chat_val_loss(g, config, forward_args):
+    """Held-out loss per token: over every token, and over assistant replies only."""
+    model, dist = g["model"], g["dist"]
+    loader = chat_loader(g, config, "val", "chat_val")
+    totals = torch.zeros(4, device=g["device"], dtype=torch.float64)
+    model.eval()
+    for _ in range(VAL_BATCHES):
+        inputs, targets, cum_seqlens, bigram_inputs, _ = next(loader)
+        losses = model(inputs, targets, cum_seqlens, bigram_inputs, forward_args).double()
+        replies = assistant_target_mask(inputs)
+        totals += torch.stack([losses.sum(), losses.new_tensor(len(losses)), (losses * replies).sum(), replies.sum().double()])
+    model.train()
+    dist.all_reduce(totals)
+    return dict(all=(totals[0] / totals[1]).item(), replies=(totals[2] / totals[3]).item())
+
+
+@torch.no_grad()
+def fineweb_val_loss(g):
+    """The pretraining validation loss, to see how much general ability tuning cost. No tokenizer
+    mask is applied, so compare it with another call of this function, not with a training log."""
+    model, manager, args, dist = g["model"], g["training_manager"], g["args"], g["dist"]
+    windows = (manager.ws_short, manager.ws_long)
+    manager.apply_final_ws_ext()
+    forward_args = manager.get_forward_args()
+    val_steps = g["grad_accum_steps"] * args.val_tokens // args.val_batch_size
+    loader = g["distributed_data_generator"](args.val_files, args.val_batch_size, -1,
+                                             grad_accum_steps=g["grad_accum_steps"], align_to_bos=False)
+    total = torch.zeros((), device=g["device"])
+    model.eval()
+    for _ in range(val_steps):
+        inputs, targets, cum_seqlens, bigram_inputs, _ = next(loader)
+        total += model(inputs, targets, cum_seqlens, bigram_inputs, forward_args).mean()
+    model.train()
+    manager.ws_short, manager.ws_long = windows
+    dist.all_reduce(total)
+    return (total / val_steps / dist.get_world_size()).item()
+
+
+def tune(g, config):
+    print0, model, manager, dist = g["print0"], g["model"], g["training_manager"], g["dist"]
+    optimizer, grad_accum_steps, grad_scale = manager.optimizer, g["grad_accum_steps"], g["grad_scale"]
+    assert config.steps % 2 == 0, "an even step count ends on an Adam update"
+    phase_started = time.perf_counter()
+    results = dict(config=asdict(config))
+
+    # One fixed configuration for the whole phase: the last pretraining stage's windows and loss.
+    stage, schedule = g["TRAINING_STAGES"][-1], g["training_schedule"]
+    manager.ws_short, manager.ws_long = stage.window_sizes
+    manager.train_max_seq_len = stage.train_max_seq_len
+    manager.mtp_weights, manager.prefix_weight = schedule.mtp_weights[-1], schedule.prefix_weights[-1]
+    forward_args = manager.get_forward_args()
+
+    model.zero_grad(set_to_none=True)
+    fresh_optimizer_state(optimizer)
+    if config.seed_tokens:
+        seed_chat_tokens(model._orig_mod)
+    model.train()
+
+    if config.fineweb_val:
+        results["fineweb_before"] = fineweb_val_loss(g)
+    results["chat_before"] = chat_val_loss(g, config, forward_args)
+    print0(f"[tune] before: chat val loss {results['chat_before']['all']:.4f} "
+           f"(replies {results['chat_before']['replies']:.4f}) setup {time.perf_counter() - phase_started:.1f}s", console=True)
+
+    loader = chat_loader(g, config, config.data, "chat_train")
+    torch.cuda.synchronize()
+    train_started = time.perf_counter()
+    for step in range(config.steps):
+        learning_rate = config.learning_rate(step)
+        for param_config in optimizer.param_cfgs.values():
+            param_config.lr = param_config.initial_lr * learning_rate
+            if param_config.optim == "normuon":
+                param_config.momentum = MUON_MOMENTUM
+        for _ in range(grad_accum_steps):
+            inputs, targets, cum_seqlens, bigram_inputs, bigram_cpu = next(loader)
+            manager.sparse_index_update(step, bigram_cpu)
+            losses = model(inputs, targets, cum_seqlens, bigram_inputs, forward_args)
+            manager.sparse_index_share(step)
+            (losses.sum() * grad_scale).backward()
+        optimizer.step(do_adam=step % 2 == 1)
+        model.quantize_attn_fp8()
+        model.quantize_mlp_fp8()
+        if step == 0:
+            torch.cuda.synchronize()
+            results["first_step_seconds"] = time.perf_counter() - train_started
+        if (step + 1) % 10 == 0 or step == 0:
+            print0(f"[tune] step:{step + 1}/{config.steps} loss:{losses.detach().mean().item():.4f} "
+                   f"lr:{learning_rate:.4f} time:{time.perf_counter() - train_started:.1f}s", console=True)
+    torch.cuda.synchronize()
+    results["train_seconds"] = time.perf_counter() - train_started
+
+    results["chat_after"] = chat_val_loss(g, config, forward_args)
+    if config.fineweb_val:
+        results["fineweb_after"] = fineweb_val_loss(g)
+    results["phase_seconds"] = time.perf_counter() - phase_started
+    print0(f"[tune] after: chat val loss {results['chat_after']['all']:.4f} "
+           f"(replies {results['chat_after']['replies']:.4f}) training {results['train_seconds']:.1f}s "
+           f"of which first step {results['first_step_seconds']:.1f}s", console=True)
+
+    if g["master_process"]:
+        run_dir = f"logs/{g['args'].run_id}"
+        os.makedirs(run_dir, exist_ok=True)
+        save_started = time.perf_counter()
+        torch.save(dict(step=config.steps, model=model.state_dict(), tune=results), f"{run_dir}/state_tuned.pt")
+        results["save_seconds"] = time.perf_counter() - save_started
+        if config.samples:
+            import chat_eval
+            manager.apply_final_ws_ext()
+            raw_model = model._orig_mod
+            raw_model.eval()
+            results["samples"] = chat_eval.evaluate(g, raw_model, manager.get_forward_args())
+        with open(f"{run_dir}/tune.json", "w") as f:
+            json.dump(results, f, indent=1)
+        summary = {k: v for k, v in results.items() if k != "samples"}
+        print0(f"[tune result] {json.dumps(summary)}", console=True)
+    return results
+
+
+def run(g):
+    """Entry point for FINETUNE_FROM: tune a saved base checkpoint."""
+    started = time.perf_counter()
+    load_base(g, os.environ["FINETUNE_FROM"])
+    g["print0"](f"[tune] base checkpoint loaded in {time.perf_counter() - started:.1f}s", console=True)
+    tune(g, TuneConfig.from_env())
+
+
+def run_after_training(g):
+    """Entry point for FINETUNE_AFTER: the model in memory has just finished pretraining."""
+    tune(g, TuneConfig.from_env())
