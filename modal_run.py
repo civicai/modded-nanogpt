@@ -1,7 +1,8 @@
 """Run the speedrun trainer on Modal with 8 H100s and keep the checkpoint on a Volume.
 
   uvx modal run modal_run.py::prep      # once: data and attention kernel onto the Volume (CPU)
-  uvx modal run modal_run.py            # train (8xH100) -> verify (CPU)
+  uvx modal run modal_run.py            # train4 (4xH200) -> verify (CPU)
+  uvx modal run modal_run.py::train     # the original 8xH100 run
   uvx modal run modal_run.py::verify --run-id <id>
   uvx modal run modal_run.py::generate --run-id <id> [--prompts '["Hello"]']
   uvx modal deploy modal_run.py         # deploys the Inference class for other services to call
@@ -112,9 +113,10 @@ def train(refresh_compile_cache: bool = False):
     return run_training(8, refresh_compile_cache)
 
 
-@app.function(image=image, volumes={VOL: volume}, gpu="H100:4", timeout=3600, cpu=16, memory=65536)
+@app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=3600, cpu=16, memory=65536)
 def train4(refresh_compile_cache: bool = False):
-    """Same run on 4 GPUs: each step accumulates 2 mini-batches, so training takes about twice as long."""
+    """Same run on 4 GPUs: each step accumulates 2 mini-batches. Pinned to H200s, which train about 30% faster
+    than H100s here and keep the compile cache (which is specific to the GPU model) warm."""
     return run_training(4, refresh_compile_cache)
 
 
@@ -244,7 +246,7 @@ class Inference:
 
 @app.local_entrypoint()
 def main():
-    run_dirs = train.remote()
+    run_dirs = train4.remote()
     print("run dirs:", run_dirs)
     for run_id in run_dirs:
         verify.remote(run_id)
