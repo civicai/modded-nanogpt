@@ -5,11 +5,12 @@
   uvx modal run modal_run.py::main            # train4 (4xH200) -> verify (CPU)
   uvx modal run modal_run.py::tune4           # chat-tune a saved base model (4xH200, a few minutes)
   uvx modal run modal_run.py::train_and_tune4 # pretrain, then chat-tune, in one job
-  uvx modal run modal_run.py::live            # pretrain, pause, chat-tune: two calls on one warm 4xH200 container
   uvx modal run modal_run.py::chat_eval --run-id <id>
   uvx modal run modal_run.py::generate --run-id <id> [--prompts '["Hello"]']
   uvx modal run modal_run.py::publish_run --run-id <id>   # make other services serve this run (CPU)
-  uvx modal deploy modal_run.py               # deploys Inference and ChatInference for other services to call
+  uvx modal deploy modal_run.py               # deploys LiveRun, Inference and ChatInference for other services to call
+
+Once deployed, live.py drives LiveRun: one held 4xH200 container that pretrains, serves and chat-tunes on cue.
 """
 import os
 import subprocess
@@ -23,8 +24,8 @@ BASE_RUN_ID = "037b2c75-2815-426c-9820-56f3e7df87e7"    # the 4xH200 pretraining
 SERVED_CHAT_RUN_ID = "0bbb8eb0-6ad1-4e93-a626-4a098b840eac"  # the tuned run ChatInference loads when given no run id
 SERVE_PORT = 8000
 
-# This branch deploys under its own name so the app serving the base model is left alone.
-app = modal.App("nanogpt-instruct")
+# This branch deploys under its own name so the apps deployed from earlier branches are left alone.
+app = modal.App("nanogpt-live")
 volume = modal.Volume.from_name("nanogpt-speedrun", create_if_missing=True)
 
 image = (
@@ -47,6 +48,14 @@ def link_data():
         link = f"{REPO}/data/{name}"
         if not os.path.exists(link):
             os.symlink(f"{VOL}/{name}", link)
+
+
+def link_runs():
+    """The trainer writes logs and checkpoints to logs/ relative to the repo; keep them on the Volume."""
+    link_data()
+    os.makedirs(f"{VOL}/runs", exist_ok=True)
+    if not os.path.exists(f"{REPO}/logs"):
+        os.symlink(f"{VOL}/runs", f"{REPO}/logs")
 
 
 def checkpoint_path(run_id: str, name_prefix: str) -> str:
@@ -112,18 +121,21 @@ def prep_chat():
 COMPILE_CACHE = "/root/compile_cache"
 
 
-def cache_tars(num_gpus: int) -> list[str]:
-    """Where a compile cache may be found, best first. This branch saves to the first (its own tar,
-    which also holds the chat-tuning graphs) and only reads the others, which belong to the base runs."""
+def cache_tars(num_gpus: int, staged: bool = False) -> list[str]:
+    """Where a compile cache may be found, best first. A job saves to the first and only reads the
+    others. The staged trainer (LiveRun) keeps its own tar, because it also compiles what sampling
+    and serving use; the tar after it holds the pretraining and chat-tuning graphs; the rest belong
+    to the base runs."""
     own = f"{VOL}/compile_cache_{num_gpus}gpu_instruct.tar"
     base = f"{VOL}/compile_cache.tar" if num_gpus == 8 else f"{VOL}/compile_cache_{num_gpus}gpu.tar"
-    return [own, base, f"{VOL}/compile_cache.tar"]
+    tars = [own, base, f"{VOL}/compile_cache.tar"]
+    return [f"{VOL}/compile_cache_{num_gpus}gpu_staged.tar", *tars] if staged else tars
 
 
-def restore_compile_cache(num_gpus: int) -> dict:
+def restore_compile_cache(num_gpus: int, staged: bool = False) -> dict:
     """torch.compile and Triton reuse kernels found here; the cache lives on local disk and travels as one tar."""
     os.makedirs(COMPILE_CACHE, exist_ok=True)
-    for tar in cache_tars(num_gpus):
+    for tar in cache_tars(num_gpus, staged):
         if os.path.exists(tar):
             subprocess.run(["tar", "-xf", tar, "-C", COMPILE_CACHE], check=True)
             print(f"compile cache restored from {tar} ({os.path.getsize(tar) / 2**30:.1f} GiB)")
@@ -131,24 +143,20 @@ def restore_compile_cache(num_gpus: int) -> dict:
     return dict(TORCHINDUCTOR_CACHE_DIR=f"{COMPILE_CACHE}/inductor", TRITON_CACHE_DIR=f"{COMPILE_CACHE}/triton")
 
 
-def save_compile_cache(num_gpus: int):
-    tar = cache_tars(num_gpus)[0]
+def save_compile_cache(num_gpus: int, staged: bool = False):
+    tar = cache_tars(num_gpus, staged)[0]
     subprocess.run(["tar", "-cf", tar + ".tmp", "-C", COMPILE_CACHE, "."], check=True)
     os.replace(tar + ".tmp", tar)
 
 
-def run_training(num_gpus: int, refresh_compile_cache: bool, extra_env: dict | None = None, cache_env: dict | None = None):
+def run_training(num_gpus: int, refresh_compile_cache: bool, extra_env: dict | None = None):
     """Checkpoints and logs are written straight to the Volume. The compile cache is only re-saved when
     it is missing or `refresh_compile_cache` is set, because packing ~10 GiB takes minutes.
-    `extra_env` selects what the trainer does (see finetune.py for the chat-tuning switches).
-    `cache_env` is what restore_compile_cache returned, for a container that has already restored it."""
+    `extra_env` selects what the trainer does (see finetune.py for the chat-tuning switches)."""
     import time
     started = time.time()
     print(f"[timing] container entered at epoch {started:.1f}")
-    link_data()
-    os.makedirs(f"{VOL}/runs", exist_ok=True)
-    if not os.path.exists(f"{REPO}/logs"):
-        os.symlink(f"{VOL}/runs", f"{REPO}/logs")
+    link_runs()
     before = set(os.listdir(f"{VOL}/runs"))
     subprocess.run(["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv"], check=True)
     has_own_cache = os.path.exists(cache_tars(num_gpus)[0])
@@ -158,10 +166,9 @@ def run_training(num_gpus: int, refresh_compile_cache: bool, extra_env: dict | N
     print(f"[host] {cpu_model}, {len(os.sched_getaffinity(0))} usable cores, load {os.getloadavg()[0]:.1f}, "
           f"{os.environ.get('MODAL_CLOUD_PROVIDER', '?')} {os.environ.get('MODAL_REGION', '?')}")
     print(f"[timing] links and nvidia-smi {time.time() - started:.1f}s")
-    if cache_env is None:
-        restore_started = time.time()
-        cache_env = restore_compile_cache(num_gpus)
-        print(f"[timing] compile cache restore {time.time() - restore_started:.1f}s")
+    restore_started = time.time()
+    cache_env = restore_compile_cache(num_gpus)
+    print(f"[timing] compile cache restore {time.time() - restore_started:.1f}s")
     env = dict(os.environ, SAVE_CHECKPOINT="1", COMPILE_DIAGNOSTICS="1", PYTHONUNBUFFERED="1", **cache_env, **(extra_env or {}))
     print(f"[timing] setup {time.time() - started:.1f}s")
     trainer_started = time.time()
@@ -238,47 +245,89 @@ def train_and_tune4(data: str = "short", steps: int = 240, lr: float = 0.25, see
     return publish_tuned(result, result["run_id"])
 
 
-LIVE_IDLE_SECONDS = 600  # how long LiveRun keeps its GPUs after a call, at about $0.30 a minute
+# What LiveRun's trainer is doing, for displays: {"snapshot": {...}} as described in live_session.py.
+# Reading it costs nothing, whereas calling a LiveRun method starts the 4-GPU container.
+live_state = modal.Dict.from_name("nanogpt-live", create_if_missing=True)
+LIVE_IDLE_SECONDS = 60  # how long LiveRun keeps its GPUs once nothing holds them, at about $0.30 a minute
+SLOW_LOAD_SECONDS = 360  # a trainer that took longer than this to load was compiling, not reading the cache
 
 
 @app.cls(image=image, volumes={VOL: volume}, gpu="H200:4", cpu=16, memory=65536,
-         timeout=3600, scaledown_window=LIVE_IDLE_SECONDS, max_containers=1)
+         timeout=4 * 3600, scaledown_window=LIVE_IDLE_SECONDS, max_containers=1)
+@modal.concurrent(max_inputs=16)
 class LiveRun:
-    """Pretraining and chat tuning as separate calls on one container, so the second call does not
-    queue for GPUs again and there can be a pause between the two. The container restores the compile
-    cache once when it starts and keeps its GPUs for LIVE_IDLE_SECONDS after each call.
+    """One held 4-GPU container for a live demonstration: it loads the trainer ahead of time, then
+    pretrains, serves the model and chat-tunes on cue, all in one process (see live_trainer.py), so
+    nothing queues for GPUs or loads compiled code while people are watching.
 
-    Within `modal run modal_run.py::live` the container lasts until that command ends. From another
-    service, deploy the app and call
-    `modal.Cls.from_name("nanogpt-instruct", "LiveRun")().pretrain.remote()`, then `.tune.remote(run_id)`."""
+    From another service, with the app deployed:
+
+        run = modal.Cls.from_name("nanogpt-live", "LiveRun")()
+        run.hold.spawn(45)               # get the GPUs and keep them 45 minutes; the trainer loads by itself
+        run.request.remote("pretrain")   # start now, or as soon as the trainer has loaded
+        run.request.remote("tune")
+        run.release.remote()             # give the GPUs back
+
+    Progress, samples and what can be queried are in the Dict `nanogpt-live` under "snapshot".
+    live.py does all of this from a terminal."""
 
     @modal.enter()
     def prepare(self):
-        import time
-        started = time.time()
-        print(f"[timing] live container entered at epoch {started:.1f}")
-        self.cache_env = restore_compile_cache(4)
-        print(f"[timing] compile cache restore {time.time() - started:.1f}s")
+        import sys
+        sys.path.insert(0, REPO)
+        from live_session import LiveSession
+        self.session = LiveSession(4, publish=lambda snapshot: live_state.put("snapshot", snapshot),
+                                   on_ready=self.loaded, on_finished=self.finished)
+        self.session.announce("restoring compiled code")
+        link_runs()
+        cache_env = restore_compile_cache(4, staged=True)
+        self.session.start_trainer(dict(os.environ, SAVE_CHECKPOINT="1", PYTHONUNBUFFERED="1", TUNE_SAMPLES="0", **cache_env))
+
+    def loaded(self):
+        if not os.path.exists(cache_tars(4, staged=True)[0]) or self.session.snapshot["loading"]["seconds"] > SLOW_LOAD_SECONDS:
+            save_compile_cache(4, staged=True)
+            volume.commit()
+            print("[live] compile cache saved", flush=True)
+
+    def finished(self, phase: str, run_id: str, results: dict | None):
+        volume.commit()
+        publish_latest("pretrained" if phase == "pretrain" else "tuned", run_id)
 
     @modal.method()
-    def warm(self):
-        """Returns once the container has its GPUs and the compile cache: call it before a demo starts."""
-        return "ready"
+    def hold(self, minutes: float = 45):
+        """Keep the GPUs for at least this many more minutes. Call with `.spawn`: it returns when the
+        lease ends, or at once if an earlier call is already keeping it."""
+        self.session.hold(minutes)
 
     @modal.method()
-    def pretrain(self, refresh_compile_cache: bool = False):
-        """Pretrain from scratch. Returns the new run id."""
-        run_id = run_training(4, refresh_compile_cache, cache_env=self.cache_env)[-1]
-        publish_latest("pretrained", run_id)
-        return run_id
+    def release(self):
+        """End the lease. The container stops about a minute later."""
+        self.session.release()
 
     @modal.method()
-    def tune(self, base_run_id: str, data: str = "short", steps: int = 240, lr: float = 0.25,
-             seed_tokens: bool = True, fineweb_val: bool = False, samples: bool = True):
-        """Chat-tune the run that `pretrain` returned (or any 4-GPU base run). Returns the tuned run's numbers."""
-        env = dict(FINETUNE_FROM=checkpoint_path(base_run_id, "state_step"),
-                   **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
-        return publish_tuned(tune_results(run_training(4, False, env, cache_env=self.cache_env)), base_run_id)
+    def request(self, action: str, options: dict | None = None):
+        """`action` is "pretrain", "tune" or "restart" (a fresh trainer, to run again). Asked for early,
+        an action is taken as soon as the trainer reaches it. "tune" takes {"steps", "lr", "data"}.
+        Returns the snapshot."""
+        return self.session.request(action, options)
+
+    @modal.method()
+    async def generate_stream(self, prompt: str, max_new_tokens: int = 120, temperature: float = 0.8, top_k: int = 50, stop: str = ""):
+        """Text completion from the pretrained model in the trainer's memory, as Inference.generate_stream."""
+        request = dict(prompt=prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, stop=stop)
+        async for chunk in stream_from_server(request, self.session.serving_port("base")):
+            yield chunk
+
+    @modal.method()
+    async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.6, top_k: int = 20):
+        """A reply from the tuned model in the trainer's memory, as ChatInference.chat_stream."""
+        request = dict(messages=messages, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
+        async for chunk in stream_from_server(request, self.session.serving_port("chat")):
+            yield chunk
+
+    @modal.exit()
+    def stop(self):
+        self.session.shut_down()
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=1800, cpu=8, memory=32768)
@@ -382,13 +431,13 @@ def start_server(checkpoint: str):
     raise RuntimeError("inference server did not start in time")
 
 
-async def stream_from_server(request: dict):
+async def stream_from_server(request: dict, port: int = SERVE_PORT):
     """Yields the server's JSON lines. Async so that a caller cancelling mid-stream closes the local
     connection (which stops the generation) instead of Modal terminating the container."""
     import asyncio
     import json
     body = json.dumps(request).encode()
-    reader, writer = await asyncio.open_connection("127.0.0.1", SERVE_PORT)
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
     try:
         writer.write(b"POST / HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         await writer.drain()
@@ -404,7 +453,7 @@ async def stream_from_server(request: dict):
          scaledown_window=300, max_containers=1, timeout=600)
 class Inference:
     """Text completion from a pretrained model:
-    `modal.Cls.from_name("nanogpt-instruct", "Inference")(run_id=...).generate_stream.remote_gen(prompt)`.
+    `modal.Cls.from_name("nanogpt-live", "Inference")(run_id=...).generate_stream.remote_gen(prompt)`.
     `run_id` picks which pretraining run to serve (see `latest_runs`); left empty it serves
     SERVED_RUN_ID. Scales to zero after 5 idle minutes."""
 
@@ -430,7 +479,7 @@ class Inference:
          scaledown_window=300, max_containers=1, timeout=600)
 class ChatInference:
     """Chat with a tuned model:
-    `modal.Cls.from_name("nanogpt-instruct", "ChatInference")(run_id=...).chat_stream.remote_gen(messages)`.
+    `modal.Cls.from_name("nanogpt-live", "ChatInference")(run_id=...).chat_stream.remote_gen(messages)`.
     `run_id` picks which tuned run to serve (see `latest_runs`), so a run that has just finished can
     be used without a redeploy; left empty it serves SERVED_CHAT_RUN_ID. Scales to zero after 5 idle minutes."""
 
@@ -459,33 +508,6 @@ def main():
     print("run dirs:", run_dirs)
     for run_id in run_dirs:
         verify.remote(run_id)
-
-
-@app.local_entrypoint()
-def live(pause: int = -1):
-    """Pretrain, pause, then chat-tune, all on one warm 4-GPU container. The pause lasts until Enter is
-    pressed, or `pause` seconds when that is given. While it lasts the base model can be sampled from
-    another terminal with `modal run modal_run.py::generate --run-id <id>`."""
-    import time
-    started = time.time()
-
-    def note(text):
-        print(f"[live {time.time() - started:6.1f}s] {text}", flush=True)
-
-    run = LiveRun()
-    note("asking for the 4-GPU container")
-    run.warm.remote()
-    note("container ready, pretraining")
-    base_run_id = run.pretrain.remote()
-    note(f"pretraining done: base run {base_run_id}")
-    if pause < 0:
-        input("Press Enter to start chat tuning... ")
-    else:
-        time.sleep(pause)
-    note("chat tuning")
-    result = run.tune.remote(base_run_id)
-    note(f"tuning done: tuned run {result['run_id']}, reply loss "
-         f"{result['chat_before']['val_short']['replies']} -> {result['chat_after']['val_short']['replies']}")
 
 
 @app.local_entrypoint()

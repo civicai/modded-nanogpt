@@ -175,14 +175,16 @@ def chat_reply(g, raw_model, forward_args, messages, max_new_tokens, temperature
   yield ("stop", "length")
 
 
-def serve(g, raw_model, forward_args, port):
-  """Blocking local HTTP server. POST / with {prompt, max_new_tokens, temperature, top_k, stop} streams a
+def warm_lengths(g, raw_model, forward_args, lengths=LENGTH_BUCKETS[:-1]):
+  """Compile the kernels for these prompt lengths, so the first request of each length does not wait."""
+  for length in lengths:
+    next_token_logits(g, raw_model, forward_args, [EOT_ID] * length)
+
+
+def make_server(g, raw_model, forward_args, port):
+  """Local HTTP server, not yet serving. POST / with {prompt, max_new_tokens, temperature, top_k, stop} streams a
   completion as lines of JSON; with {messages, ...} in place of prompt it streams a chat reply."""
   from http.server import BaseHTTPRequestHandler, HTTPServer
-
-  # Compile kernels for the common lengths before taking requests; the longest bucket compiles on first use.
-  for length in LENGTH_BUCKETS[:-1]:
-    next_token_logits(g, raw_model, forward_args, [EOT_ID] * length)
 
   class Handler(BaseHTTPRequestHandler):
     def reply(self, status, body):
@@ -229,8 +231,16 @@ def serve(g, raw_model, forward_args, port):
     def log_message(self, *_):
       pass
 
+  return HTTPServer(("127.0.0.1", port), Handler)
+
+
+def serve(g, raw_model, forward_args, port):
+  """Blocking: serve generations until the process is stopped."""
+  # The longest bucket compiles on first use.
+  warm_lengths(g, raw_model, forward_args)
+  server = make_server(g, raw_model, forward_args, port)
   g["print0"](f"[generate] serving on port {port}", console=True)
-  HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+  server.serve_forever()
 
 
 def run(g):

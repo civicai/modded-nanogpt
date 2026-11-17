@@ -18,6 +18,7 @@ The fastest record (ANVIL2, about 40 s) adds a 65B-parameter n-gram table, rough
 | `generate.py` (new) | Text generation from a checkpoint, either printing samples or serving them over local HTTP. |
 | `train_gpt.py` | `SAVE_CHECKPOINT=1` saves a checkpoint at the end of training. `GENERATE_FROM=<checkpoint>` runs generation instead of training. |
 | `finetune.py`, `chat_data.py`, `chat_format.py`, `chat_eval.py` (new, `instruct-tuning` branch) | Chat tuning with dedicated turn tokens: see the section below. |
+| `live_trainer.py`, `live_session.py`, `live.py`, `demo/` (new, `live-demo` branch) | One held container that pretrains, serves and chat-tunes on cue for a live demonstration: see the section below. |
 
 ### Running it
 
@@ -117,6 +118,47 @@ About 4xH200 cost: $0.30 per minute, so roughly $0.80 for `tune4` and $2 for `tr
 | [yahma/alpaca-cleaned](https://huggingface.co/datasets/yahma/alpaca-cleaned) | short question-and-answer pairs | CC BY-NC 4.0 (non-commercial) |
 | [HuggingFaceTB/everyday-conversations-llama3.1-2k](https://huggingface.co/datasets/HuggingFaceTB/everyday-conversations-llama3.1-2k) | small talk, multi-turn | Apache-2.0 |
 | Identity examples in `chat_data.py` | "who are you" answers | written for this repo |
+
+### Live demonstration (`live-demo` branch)
+
+This branch makes the two training phases something that can be started on cue in front of an audience. It deploys as its own Modal app, `nanogpt-live`, so the earlier apps are untouched.
+
+**How it works**
+
+- `LiveRun` in `modal_run.py` is one 4xH200 container. As soon as it starts it launches the trainer, which loads all of its compiled code (pretraining, chat tuning and text sampling) and then waits. This is the slow part, about 3 minutes, and it happens before anyone is watching.
+- On "pretrain" the trainer runs the usual 1,290 steps, printing short text samples as it goes (densely at first, when the text changes fastest) and the validation loss every 250 steps.
+- When pretraining ends, the same process answers generation requests from the model in its memory, so there is no second wait for a GPU and no cold start.
+- On "tune" it chat-tunes that model, sampling replies every 40 steps. Afterwards rank 0 serves the tuned model and rank 1 reloads and serves the pretrained one.
+- `live_trainer.py` is the trainer's side of this, `live_session.py` the container's side. Progress is kept as one snapshot in the Modal Dict `nanogpt-live`, which displays read without waking the container.
+
+**Commands** (after `uvx modal deploy modal_run.py`)
+
+```bash
+uvx --with modal python live.py warm --minutes 45   # get the GPUs and load the trainer, ahead of time
+uvx --with modal python live.py pretrain            # start pretraining and follow it
+uvx --with modal python live.py tune                # start chat tuning and follow it
+uvx --with modal python live.py status
+uvx --with modal python live.py restart             # a fresh trainer on the same GPUs, to run again
+uvx --with modal python live.py release             # give the GPUs back
+```
+
+- `pretrain` and `tune` work from a cold start too: they get the GPUs, wait for the trainer to load and then begin.
+- The GPUs are held until the time asked for runs out (`--minutes`, 45 by default, 3 hours at most) or `release` is called, at about $0.30 a minute. Each command that starts something extends the hold.
+- A trainer runs each phase once. `restart` replaces it without giving up the GPUs.
+
+**Timings** (4xH200, 16 Nov 2026, one run)
+
+| Stage | Time |
+|---|---|
+| Wait for GPUs | 1:30 and over 9 minutes on two attempts the same evening |
+| Container start to "ready" (compile cache copy, trainer start-up, warm-up) | 3:15 |
+| "pretrain" to a finished, queryable model | 2:57 |
+| "tune" to a finished, queryable chat model | 0:27 |
+| First reply from either model once it is ready | about 2 s |
+
+**The demo page**
+
+The audience-facing page is `/p/nanogpt-live` in salt. `demo/tab.py` publishes a single HTML file to it as a tab, and reports back whether the page ran the code without errors. `.claude/skills/live-demo/SKILL.md` tells a Claude Code session, started in this folder, how to run the trainer and write those tabs during the talk; The tabs are written live. Tested versions of the three of them are kept in salt, behind buttons in the page's presenter menu, for when a live attempt goes wrong. `demo/prompts.md` lists the prompts to offer. `demo/claude-settings.example.json` lists the permissions that session needs to work without prompting.
 
 ### Environment notes
 

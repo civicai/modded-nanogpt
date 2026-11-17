@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass
 import tiktoken
 import torch
 
+import live_trainer
 from chat_format import SEED_TOKENS, assistant_target_mask
 
 BATCH_TOKENS = 8 * 2048 * 8  # per optimizer step, the same as the first pretraining stage
@@ -156,19 +157,36 @@ def fineweb_val_loss(g):
     return (total / val_steps / dist.get_world_size()).item()
 
 
+def phase_forward_args(g):
+    """One fixed configuration for the whole phase: the last pretraining stage's windows and loss."""
+    manager, stage, schedule = g["training_manager"], g["TRAINING_STAGES"][-1], g["training_schedule"]
+    manager.ws_short, manager.ws_long = stage.window_sizes
+    manager.train_max_seq_len = stage.train_max_seq_len
+    manager.mtp_weights, manager.prefix_weight = schedule.mtp_weights[-1], schedule.prefix_weights[-1]
+    return manager.get_forward_args()
+
+
+def warm_graphs(g, config):
+    """Run the passes tuning uses once, so their compiled code is loaded before tuning is asked for.
+    Leaves gradients behind: the caller is expected to reset the model afterwards."""
+    model = g["model"]
+    forward_args = phase_forward_args(g)
+    model.train()
+    loader = chat_loader(g, config, config.data, "chat_train")
+    for _ in range(g["grad_accum_steps"]):
+        inputs, targets, cum_seqlens, bigram_inputs, _ = next(loader)
+        losses = model(inputs, targets, cum_seqlens, bigram_inputs, forward_args)
+        (losses.sum() * g["grad_scale"]).backward()
+    chat_val_loss(g, config, forward_args)
+
+
 def tune(g, config):
     print0, model, manager, dist = g["print0"], g["model"], g["training_manager"], g["dist"]
     optimizer, grad_accum_steps, grad_scale = manager.optimizer, g["grad_accum_steps"], g["grad_scale"]
     assert config.steps % 2 == 0, "an even step count ends on an Adam update"
     phase_started = time.perf_counter()
     results = dict(config=asdict(config))
-
-    # One fixed configuration for the whole phase: the last pretraining stage's windows and loss.
-    stage, schedule = g["TRAINING_STAGES"][-1], g["training_schedule"]
-    manager.ws_short, manager.ws_long = stage.window_sizes
-    manager.train_max_seq_len = stage.train_max_seq_len
-    manager.mtp_weights, manager.prefix_weight = schedule.mtp_weights[-1], schedule.prefix_weights[-1]
-    forward_args = manager.get_forward_args()
+    forward_args = phase_forward_args(g)
 
     model.zero_grad(set_to_none=True)
     fresh_optimizer_state(optimizer)
@@ -185,6 +203,8 @@ def tune(g, config):
     torch.cuda.synchronize()
     train_started = time.perf_counter()
     for step in range(config.steps):
+        if live_trainer.ENABLED:
+            live_trainer.on_tune_step(g, step, config.steps, forward_args)
         learning_rate = config.learning_rate(step)
         for param_config in optimizer.param_cfgs.values():
             param_config.lr = param_config.initial_lr * learning_rate
@@ -203,10 +223,15 @@ def tune(g, config):
             torch.cuda.synchronize()
             results["first_step_seconds"] = time.perf_counter() - train_started
         if (step + 1) % 10 == 0 or step == 0:
-            print0(f"[tune] step:{step + 1}/{config.steps} loss:{losses.detach().mean().item():.4f} "
+            loss = losses.detach().mean().item()
+            print0(f"[tune] step:{step + 1}/{config.steps} loss:{loss:.4f} "
                    f"lr:{learning_rate:.4f} time:{time.perf_counter() - train_started:.1f}s", console=True)
+            if live_trainer.ENABLED:
+                live_trainer.emit(g, "loss", phase="tune", step=step + 1, loss=round(loss, 4))
     torch.cuda.synchronize()
     results["train_seconds"] = time.perf_counter() - train_started
+    if live_trainer.ENABLED:
+        live_trainer.on_tune_step(g, config.steps, config.steps, forward_args)
 
     results["chat_after"] = chat_val_loss(g, config, forward_args)
     if config.fineweb_val:

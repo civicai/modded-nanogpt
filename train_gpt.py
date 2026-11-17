@@ -64,6 +64,7 @@ from triton_kernels import (
 from dc_triton_kernels import (
     dc_attention_postonly_nodd_correction_add_base_triton,
 )
+import live_trainer
 # Fused triton kernel: relu(x @ W1.T)^2 @ W2.T
 # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
 ReLUSqrdMLP = FusedLinearReLUSquareFunction.apply
@@ -2703,6 +2704,8 @@ for step in warmup_steps:
     torch.cuda.synchronize()
     print0(f"warmup step {step}: eval {eval_t1 - step_t0:.1f}s train {time.perf_counter() - eval_t1:.1f}s "
            f"(total so far {time.perf_counter() - warmup_t0:.0f}s)", console=True)
+if live_trainer.ENABLED:
+    live_trainer.warm_extra_graphs(globals())
 if os.environ.get("COMPILE_DIAGNOSTICS") == "1":
     from torch._dynamo.utils import compile_times, counters
     for group in ("inductor", "aot_autograd", "stats", "frames"):
@@ -2732,6 +2735,9 @@ train_loader = distributed_data_generator(args.train_files, TRAINING_STAGES[0].b
 canon_mask_builder = BackgroundCanonicalMask(model.vocab_size, owner=master_process, print0=print0)
 
 gc.collect()
+
+if live_trainer.ENABLED:
+    live_trainer.start_pretraining(globals())
 
 training_time_ms = 0
 # start the clock
@@ -2772,9 +2778,13 @@ for step in range(train_steps + 1):
         dist.reduce(val_loss, 0, op=dist.ReduceOp.AVG)
         print0(f"step:{step}/{train_steps} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/max(step, 1):.2f}ms", console=True)
         model.train()
+        if live_trainer.ENABLED:
+            live_trainer.on_pretrain_step(globals(), step, val_loss)
         # start the clock again
         torch.cuda.synchronize()
         t0 = time.perf_counter()
+    elif live_trainer.ENABLED:
+        live_trainer.on_pretrain_step(globals(), step)
 
     if last_step:
         if master_process and args.save_checkpoint:
@@ -2808,6 +2818,10 @@ if args.run_evals:
                        seq_len=args.val_batch_size // (grad_accum_steps * world_size),
                        get_bigram_hash=get_bigram_hash,
                        print0=print0)
+
+# A live demonstration serves the model, tunes it when asked and never returns: see live_trainer.py.
+if live_trainer.ENABLED:
+    live_trainer.finish(globals())
 
 # Chat tuning straight after training, in the same job: see finetune.py.
 if os.environ.get("FINETUNE_AFTER") == "1":
