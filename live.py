@@ -60,8 +60,7 @@ def release():
     if snapshot["status"] == "queued":
         for call_id in lease.get("calls", []):
             modal.FunctionCall.from_id(call_id).cancel()
-    elif snapshot["status"] not in ("offline", "stopped"):
-        modal.Cls.from_name(APP, "LiveRun")().release.remote()
+    # A running container reads the lease below and gives the GPUs back; see LiveRun.watch.
     live_state["lease"] = dict(at=time.time(), until=0, calls=[])
 
 

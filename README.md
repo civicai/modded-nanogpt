@@ -144,6 +144,7 @@ uvx --with modal python live.py release             # give the GPUs back
 
 - `pretrain` and `tune` work from a cold start too: they get the GPUs, wait for the trainer to load and then begin.
 - The GPUs are held until the time asked for runs out (`--minutes`, 45 by default, 3 hours at most) or `release` is called, at about $0.30 a minute. Each command that starts something extends the hold.
+- Deploying again while the GPUs are held is safe but ends the run in progress: Modal sends every later call to the new version, so the running container notices within about half a minute, gives its GPUs back, and a container of the new version starts for whatever was asked meanwhile. `release` is read from the Dict, so it works on either version.
 - A trainer runs each phase once. `restart` replaces it without giving up the GPUs.
 
 **Timings** (16 Nov 2026, one run on 4xH200 and one on 4xH100)

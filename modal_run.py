@@ -14,6 +14,8 @@ Once deployed, live.py drives LiveRun: one held 4xH200 container that pretrains,
 """
 import os
 import subprocess
+import threading
+import time
 
 import modal
 
@@ -311,6 +313,8 @@ SLOW_LOAD_SECONDS = 360  # a trainer that took longer than this to load was comp
 # Four H200s train about 30% faster, but there are evenings when none can be had for most of an hour
 # while four H100s arrive in seconds. Modal takes the first of these it can get.
 LIVE_GPUS = ["H200:4", "H100:4"]
+WATCH_SECONDS = 5        # how often LiveRun looks for a release, and for a newer deployment
+SUPERSEDED_CHECKS = 6    # checks in a row that must find a newer deployment before LiveRun gives way
 
 
 @app.cls(image=image, volumes={VOL: volume}, gpu=LIVE_GPUS, cpu=16, memory=65536,
@@ -341,6 +345,8 @@ class LiveRun:
         self.session = LiveSession(4, publish=lambda snapshot: live_state.put("snapshot", snapshot),
                                    on_ready=self.loaded, on_finished=self.finished,
                                    details=dict(gpu=gpus.stdout.strip().split("\n")[0]))
+        self.handled_release = self.released_at()
+        threading.Thread(target=self.watch, daemon=True).start()
         self.session.announce("restoring compiled code")
         link_runs()
         cache_env = restore_compile_cache(4, staged=True)
@@ -359,15 +365,46 @@ class LiveRun:
         publish_latest("pretrained" if phase == "pretrain" else "tuned", run_id)
         prune_runs()
 
+    def released_at(self):
+        """When the lease in the Dict was given up, or None while it is being held."""
+        lease = live_state.get("lease") or {}
+        return lease.get("at") if lease.get("until") == 0 else None
+
+    def watch(self):
+        """Ends the hold when the lease in the Dict is given up, or when the app has been deployed
+        again. After a deployment Modal sends every call to the new version, which cannot start
+        while this container keeps the only place: a `release` call would never arrive, so the
+        release is read from the Dict instead, and this container gives way by itself."""
+        superseded = 0
+        while True:
+            time.sleep(WATCH_SECONDS)
+            try:
+                released = self.released_at()
+                if released is not None and released != self.handled_release:
+                    self.handled_release = released
+                    print("[live] the lease was released", flush=True)
+                    self.session.release()
+                # The deployed version has no container while this one runs: this one is the old version.
+                deployed = modal.Cls.from_name(app.name, "LiveRun")().hold.get_current_stats()
+                superseded = superseded + 1 if deployed.num_total_runners == 0 else 0
+                if superseded == SUPERSEDED_CHECKS:
+                    print("[live] the app was deployed again; giving the GPUs to the new version", flush=True)
+                    self.session.release()
+            except Exception as error:
+                print(f"[live] could not check the lease: {error!r}", flush=True)
+
     @modal.method()
     def hold(self, minutes: float = 45):
         """Keep the GPUs for at least this many more minutes. Call with `.spawn`: it returns when the
         lease ends, or at once if an earlier call is already keeping it."""
+        self.handled_release = self.released_at()  # a release from before this call is not for it
         self.session.hold(minutes)
 
     @modal.method()
     def release(self):
-        """End the lease. The container stops about a minute later."""
+        """End the lease. The container stops about a minute later. Writing a lease with "until": 0
+        to the Dict does the same within seconds and, unlike this call, cannot start a container
+        or wait behind a deployment; live.py and salt release that way."""
         self.session.release()
 
     @modal.method()
