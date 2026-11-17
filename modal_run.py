@@ -8,6 +8,7 @@
   uvx modal run modal_run.py::live            # pretrain, pause, chat-tune: two calls on one warm 4xH200 container
   uvx modal run modal_run.py::chat_eval --run-id <id>
   uvx modal run modal_run.py::generate --run-id <id> [--prompts '["Hello"]']
+  uvx modal run modal_run.py::publish_run --run-id <id>   # make other services serve this run (CPU)
   uvx modal deploy modal_run.py               # deploys Inference and ChatInference for other services to call
 """
 import os
@@ -56,6 +57,38 @@ def checkpoint_path(run_id: str, name_prefix: str) -> str:
     if not names:
         raise FileNotFoundError(f"no {name_prefix}*.pt in {run_dir}")
     return f"{run_dir}/{names[-1]}"
+
+
+# Which finished runs other services should serve: {"pretrained" | "tuned": {"run_id", "finished"}}.
+# A caller reads this and passes the run id to Inference or ChatInference, so it follows new runs
+# without a redeploy.
+latest_runs = modal.Dict.from_name("nanogpt-latest-runs", create_if_missing=True)
+CHECKPOINT_PREFIX = dict(pretrained="state_step", tuned="state_tuned")
+
+
+def publish_latest(kind: str, run_id: str):
+    """Record `run_id` as the run of this kind to serve. Call once its checkpoint is committed to the Volume."""
+    finished = os.path.getmtime(checkpoint_path(run_id, CHECKPOINT_PREFIX[kind]))
+    latest_runs[kind] = dict(run_id=run_id, finished=finished)
+    print(f"latest {kind} run is now {run_id}")
+
+
+def publish_tuned(result: dict, base_run_id: str) -> dict:
+    """Publish a tuned run together with the base it was tuned from, so the two served models are a
+    before-and-after pair."""
+    publish_latest("pretrained", base_run_id)
+    publish_latest("tuned", result["run_id"])
+    return result
+
+
+@app.function(image=image, volumes={VOL: volume}, timeout=300)
+def publish_run(run_id: str):
+    """CPU-only: serve this run's checkpoints (whichever of the two kinds it has), for example to go
+    back to a known-good run."""
+    names = os.listdir(f"{VOL}/runs/{run_id}")
+    for kind, prefix in CHECKPOINT_PREFIX.items():
+        if any(name.startswith(prefix) and name.endswith(".pt") for name in names):
+            publish_latest(kind, run_id)
 
 
 @app.function(image=image, volumes={VOL: volume}, timeout=1800, cpu=4, memory=8192)
@@ -158,14 +191,18 @@ def run_training(num_gpus: int, refresh_compile_cache: bool, extra_env: dict | N
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H100:8", timeout=3600, cpu=32, memory=131072)
 def train(refresh_compile_cache: bool = False):
-    return run_training(8, refresh_compile_cache)
+    run_ids = run_training(8, refresh_compile_cache)
+    publish_latest("pretrained", run_ids[-1])
+    return run_ids
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=3600, cpu=16, memory=65536)
 def train4(refresh_compile_cache: bool = False):
     """Same run on 4 GPUs: each step accumulates 2 mini-batches. Pinned to H200s, which train about 30% faster
     than H100s here and keep the compile cache (which is specific to the GPU model) warm."""
-    return run_training(4, refresh_compile_cache)
+    run_ids = run_training(4, refresh_compile_cache)
+    publish_latest("pretrained", run_ids[-1])
+    return run_ids
 
 
 def tune_env(data: str, steps: int, lr: float, seed_tokens: bool, fineweb_val: bool, samples: bool) -> dict:
@@ -183,11 +220,13 @@ def tune_results(run_ids: list[str]) -> dict:
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=1800, cpu=16, memory=65536)
 def tune4(base_run_id: str = BASE_RUN_ID, data: str = "short", steps: int = 240, lr: float = 0.25,
           seed_tokens: bool = True, fineweb_val: bool = False, samples: bool = True,
-          refresh_compile_cache: bool = False):
-    """Chat-tune a saved 4-GPU base model. Saves runs/<new id>/state_tuned.pt and returns the run's numbers."""
+          refresh_compile_cache: bool = False, publish: bool = True):
+    """Chat-tune a saved 4-GPU base model. Saves runs/<new id>/state_tuned.pt and returns the run's numbers.
+    `publish` makes it the tuned run other services serve; experiments turn that off."""
     env = dict(FINETUNE_FROM=checkpoint_path(base_run_id, "state_step"),
                **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
-    return tune_results(run_training(4, refresh_compile_cache, env))
+    result = tune_results(run_training(4, refresh_compile_cache, env))
+    return publish_tuned(result, base_run_id) if publish else result
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=3600, cpu=16, memory=65536)
@@ -195,7 +234,8 @@ def train_and_tune4(data: str = "short", steps: int = 240, lr: float = 0.25, see
                     fineweb_val: bool = False, samples: bool = True, refresh_compile_cache: bool = False):
     """Pretrain from scratch, then chat-tune, in one job. The run folder gets both checkpoints."""
     env = dict(FINETUNE_AFTER="1", **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
-    return tune_results(run_training(4, refresh_compile_cache, env))
+    result = tune_results(run_training(4, refresh_compile_cache, env))
+    return publish_tuned(result, result["run_id"])
 
 
 LIVE_IDLE_SECONDS = 600  # how long LiveRun keeps its GPUs after a call, at about $0.30 a minute
@@ -228,7 +268,9 @@ class LiveRun:
     @modal.method()
     def pretrain(self, refresh_compile_cache: bool = False):
         """Pretrain from scratch. Returns the new run id."""
-        return run_training(4, refresh_compile_cache, cache_env=self.cache_env)[-1]
+        run_id = run_training(4, refresh_compile_cache, cache_env=self.cache_env)[-1]
+        publish_latest("pretrained", run_id)
+        return run_id
 
     @modal.method()
     def tune(self, base_run_id: str, data: str = "short", steps: int = 240, lr: float = 0.25,
@@ -236,7 +278,7 @@ class LiveRun:
         """Chat-tune the run that `pretrain` returned (or any 4-GPU base run). Returns the tuned run's numbers."""
         env = dict(FINETUNE_FROM=checkpoint_path(base_run_id, "state_step"),
                    **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
-        return tune_results(run_training(4, False, env, cache_env=self.cache_env))
+        return publish_tuned(tune_results(run_training(4, False, env, cache_env=self.cache_env)), base_run_id)
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=1800, cpu=8, memory=32768)
@@ -361,13 +403,16 @@ async def stream_from_server(request: dict):
 @app.cls(image=image, volumes={VOL: volume}, gpu="H100", cpu=8, memory=32768,
          scaledown_window=300, max_containers=1, timeout=600)
 class Inference:
-    """Text completion from the base model:
-    `modal.Cls.from_name("nanogpt-instruct", "Inference")().generate_stream.remote_gen(prompt)`.
-    Scales to zero after 5 idle minutes."""
+    """Text completion from a pretrained model:
+    `modal.Cls.from_name("nanogpt-instruct", "Inference")(run_id=...).generate_stream.remote_gen(prompt)`.
+    `run_id` picks which pretraining run to serve (see `latest_runs`); left empty it serves
+    SERVED_RUN_ID. Scales to zero after 5 idle minutes."""
+
+    run_id: str = modal.parameter(default="")
 
     @modal.enter()
     def start(self):
-        self.server = start_server(checkpoint_path(SERVED_RUN_ID, "state_step"))
+        self.server = start_server(checkpoint_path(self.run_id or SERVED_RUN_ID, "state_step"))
 
     @modal.method()
     async def generate_stream(self, prompt: str, max_new_tokens: int = 120, temperature: float = 0.8, top_k: int = 50, stop: str = ""):
@@ -386,8 +431,8 @@ class Inference:
 class ChatInference:
     """Chat with a tuned model:
     `modal.Cls.from_name("nanogpt-instruct", "ChatInference")(run_id=...).chat_stream.remote_gen(messages)`.
-    `run_id` picks which tuned run to serve, so a run that has just finished can be used without a
-    redeploy; left empty it serves SERVED_CHAT_RUN_ID. Scales to zero after 5 idle minutes."""
+    `run_id` picks which tuned run to serve (see `latest_runs`), so a run that has just finished can
+    be used without a redeploy; left empty it serves SERVED_CHAT_RUN_ID. Scales to zero after 5 idle minutes."""
 
     run_id: str = modal.parameter(default="")
 
@@ -446,10 +491,11 @@ def live(pause: int = -1):
 @app.local_entrypoint()
 def sweep(configs: str, out: str = ""):
     """Run several tune4 jobs at once. `configs` is a JSON list of tune4 keyword dicts; each result is
-    printed as one JSON line and, if `out` is given, appended to that local file."""
+    printed as one JSON line and, if `out` is given, appended to that local file. The runs are
+    experiments, so none of them becomes the served model."""
     import json
     settings = json.loads(configs)
-    calls = [tune4.spawn(**setting) for setting in settings]
+    calls = [tune4.spawn(**setting, publish=False) for setting in settings]
     for setting, call in zip(settings, calls):
         try:
             result = call.get()

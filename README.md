@@ -67,8 +67,23 @@ uvx modal run modal_run.py::prep_chat        # once: build the chat shards (CPU)
 uvx modal run modal_run.py::tune4            # tune the saved base model, 4xH200
 uvx modal run modal_run.py::train_and_tune4  # pretrain from scratch, then tune, in one job
 uvx modal run modal_run.py::chat_eval --run-id <id>
+uvx modal run modal_run.py::publish_run --run-id <id>   # serve an older run again (CPU)
 uvx modal deploy modal_run.py                # serve it: ChatInference(run_id=...).chat_stream
 ```
+
+**Serving the latest run**
+
+Every training job ends by writing the run it produced to the Modal Dict `nanogpt-latest-runs`, under `pretrained` and `tuned`. A service that wants the newest models reads the Dict and passes the run id on:
+
+```python
+runs = modal.Dict.from_name("nanogpt-latest-runs")
+run_id = runs["tuned"]["run_id"]
+modal.Cls.from_name("nanogpt-instruct", "ChatInference")(run_id=run_id).chat_stream.remote_gen(messages)
+```
+
+- Each run id gets its own container, so a new run is served about a minute after it finishes (one cold start) and no redeploy is needed. `Inference(run_id=...)` does the same for the pretrained model.
+- A tuning job publishes its base run as `pretrained` too, so the two served models are always a before-and-after pair.
+- `sweep` runs are experiments and are not published. `publish_run` points the Dict at any earlier run, for example to go back to a known-good one.
 
 **Timings** (4xH200, warm compile cache, 14 Nov 2026)
 
