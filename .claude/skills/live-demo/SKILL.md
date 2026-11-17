@@ -58,10 +58,11 @@ To change a tab later, edit its file and publish again under the same title.
 - Light background, dark text, no emojis. The page already styles `body` (18px text, 24px padding),
   headings, `button`, `input`, `textarea` and `select`. Colors that fit: navy `#0d2a45`, blue
   `#23527f`, red accent `#e36344`, grays `#f9fafb`, `#e5e7eb`, `#4b5563`.
-- It is shown on a laptop, zoomed in, to people sitting back from it: body text at 18px or more, and
-  the important content visible without scrolling.
-- No libraries, no CDNs, no images, no network requests of your own. Plain HTML, CSS and JavaScript,
-  with inline SVG for charts.
+- It is shown on a laptop, zoomed in, beside a sidebar, to people sitting back from it: body text at
+  18px or more. The page may be as narrow as 640px and as short as 430px, so lay it out to fit that
+  without scrolling where you can.
+- It runs in a sandbox. No libraries, no CDNs, no images, no network requests, no `localStorage` or
+  cookies. Plain HTML, CSS and JavaScript, with inline SVG for charts.
 - Put text from the model on the page with `textContent`, never `innerHTML`.
 - Everything the page needs from outside comes from the global `demo` object below.
 
