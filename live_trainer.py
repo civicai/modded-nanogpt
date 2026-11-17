@@ -136,6 +136,13 @@ def start_pretraining(g):
     emit(g, "started", phase="pretrain", run_id=g["args"].run_id, total=g["training_schedule"].total_steps)
 
 
+def validates(step):
+    """Whether to measure the validation loss before this step. A live run measures it wherever it
+    samples text, in place of the usual every 250 steps, so that each sample on a display has a loss
+    and the steep early part of the curve is drawn."""
+    return step in PRETRAIN_SAMPLE_STEPS
+
+
 def on_pretrain_step(g, step, val_loss=None):
     """Called once per step, after that step's validation if it had one and before its update."""
     if not g["master_process"]:

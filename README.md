@@ -159,6 +159,7 @@ uvx --with modal python live.py release             # give the GPUs back
 
 - `LiveRun` asks for four H200s and falls back to four H100s (`LIVE_GPUS`). On the same evening a request pinned to H200s waited 47 minutes without being served while H100s arrived in seconds.
 - The pretraining figure includes about 20 s of sampling, 18 s of validation passes and the checkpoint save.
+- Since 17 Nov a live run measures the validation loss at each of the 15 steps where it samples text, in place of every 250 steps (7 passes), so that a display can draw the steep early part of the loss curve. One run on 4xH200 then took 3:10 from the first step to a finished model, against 2:53 to 2:57 before.
 
 **The demo page**
 
