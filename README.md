@@ -125,7 +125,7 @@ This branch makes the two training phases something that can be started on cue i
 
 **How it works**
 
-- `LiveRun` in `modal_run.py` is one 4xH200 container. As soon as it starts it launches the trainer, which loads all of its compiled code (pretraining, chat tuning and text sampling) and then waits. This is the slow part, about 3 minutes, and it happens before anyone is watching.
+- `LiveRun` in `modal_run.py` is one 4-GPU container. As soon as it starts it launches the trainer, which loads all of its compiled code (pretraining, chat tuning and text sampling) and then waits. This is the slow part, about 3 minutes, and it happens before anyone is watching.
 - On "pretrain" the trainer runs the usual 1,290 steps, printing short text samples as it goes (densely at first, when the text changes fastest) and the validation loss every 250 steps.
 - When pretraining ends, the same process answers generation requests from the model in its memory, so there is no second wait for a GPU and no cold start.
 - On "tune" it chat-tunes that model, sampling replies every 40 steps. Afterwards rank 0 serves the tuned model and rank 1 reloads and serves the pretrained one.
@@ -146,15 +146,18 @@ uvx --with modal python live.py release             # give the GPUs back
 - The GPUs are held until the time asked for runs out (`--minutes`, 45 by default, 3 hours at most) or `release` is called, at about $0.30 a minute. Each command that starts something extends the hold.
 - A trainer runs each phase once. `restart` replaces it without giving up the GPUs.
 
-**Timings** (4xH200, 16 Nov 2026, one run)
+**Timings** (16 Nov 2026, one run on 4xH200 and one on 4xH100)
 
-| Stage | Time |
-|---|---|
-| Wait for GPUs | 1:30 and over 9 minutes on two attempts the same evening |
-| Container start to "ready" (compile cache copy, trainer start-up, warm-up) | 3:15 |
-| "pretrain" to a finished, queryable model | 2:57 |
-| "tune" to a finished, queryable chat model | 0:27 |
-| First reply from either model once it is ready | about 2 s |
+| Stage | 4xH200 | 4xH100 |
+|---|---|---|
+| Wait for GPUs | 1:30 | 0:20 |
+| Container start to "ready" (compile cache copy, trainer start-up, warm-up) | 3:15 | 3:47 |
+| "pretrain" to a finished, queryable model | 2:57 | 2:56 |
+| "tune" to a finished, queryable chat model | 0:27 | 0:28 |
+| A reply from either model once it is ready | under 1 s | under 1 s |
+
+- `LiveRun` asks for four H200s and falls back to four H100s (`LIVE_GPUS`). On the same evening a request pinned to H200s waited 47 minutes without being served while H100s arrived in seconds.
+- The pretraining figure includes about 20 s of sampling, 18 s of validation passes and the checkpoint save.
 
 **The demo page**
 
