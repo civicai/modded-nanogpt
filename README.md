@@ -161,7 +161,12 @@ uvx --with modal python live.py release             # give the GPUs back
 
 **The demo page**
 
-The audience-facing page is `/p/nanogpt-live` in salt. `demo/tab.py` publishes a single HTML file to it as a tab, and reports back whether the page ran the code without errors. `.claude/skills/live-demo/SKILL.md` tells a Claude Code session, started in this folder, how to run the trainer and write those tabs during the talk; The tabs are written live. Tested versions of the three of them are kept in salt, behind buttons in the page's presenter menu, for when a live attempt goes wrong. `demo/prompts.md` lists the prompts to offer. `demo/claude-settings.example.json` lists the permissions that session needs to work without prompting.
+The audience-facing page is `/p/nanogpt-live` in salt. There are two ways to have Claude Fable drive it:
+
+- **From the page itself (the main path).** The page has a chat box. salt's API runs Fable through OpenRouter with four tools: publish a page, read a page, edit a page, and start a training phase. Nothing in this repo is involved beyond the deployed Modal app, so the demo needs only a browser. The instructions Fable follows there are in salt at `data/shared/pages/config/nanogpt_live/system_prompt.md`.
+- **From a Claude Code session in this folder (the alternative).** `.claude/skills/live-demo/SKILL.md` tells the session how to run the trainer with `live.py` and write pages; `demo/tab.py` publishes a single HTML file to the page as a tab and reports back whether the page ran the code without errors. `demo/claude-settings.example.json` lists the permissions that session needs to work without prompting.
+
+The two sets of instructions describe the same pages and the same `demo` object that pages use, so a change to one belongs in the other. Pages are written live either way. Tested versions of three of them are kept in salt, behind buttons in the page's presenter menu, for when a live attempt goes wrong. `demo/prompts.md` lists the prompts to offer.
 
 ### Environment notes
 
