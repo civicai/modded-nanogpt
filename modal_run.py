@@ -90,6 +90,57 @@ def publish_tuned(result: dict, base_run_id: str) -> dict:
     return result
 
 
+KEPT_RUNS = 10            # runs whose checkpoints stay on the Volume; a run with both is about 3.8 GB
+PINNED_RUN_IDS = (SERVED_RUN_ID, BASE_RUN_ID, SERVED_CHAT_RUN_ID)
+SETTLED_SECONDS = 3600    # nothing newer than this is deleted, in case a run is still writing it
+
+
+def expired_runs(keep: int = KEPT_RUNS) -> list[str]:
+    """Names under runs/ that are no longer needed: everything but the `keep` newest runs that have
+    a checkpoint, the runs being served (`latest_runs`) and the ones this file names. A run is its
+    folder plus its <run id>.txt log."""
+    import time
+    runs = f"{VOL}/runs"
+    names = os.listdir(runs)
+    finished = {}
+    for name in names:
+        folder = f"{runs}/{name}"
+        checkpoints = [f for f in os.listdir(folder) if f.endswith(".pt")] if os.path.isdir(folder) else []
+        if checkpoints:
+            finished[name] = max(os.path.getmtime(f"{folder}/{f}") for f in checkpoints)
+    kept = set(sorted(finished, key=finished.get)[-keep:]) | set(PINNED_RUN_IDS)
+    kept |= {latest["run_id"] for latest in latest_runs.values()}
+    cutoff = time.time() - SETTLED_SECONDS
+    return sorted(name for name in names
+                  if name.removesuffix(".txt") not in kept and os.path.getmtime(f"{runs}/{name}") < cutoff)
+
+
+def prune_runs():
+    """Delete the runs that have expired. Called once a run has been saved and published; a failure
+    here must never cost a run, so it is only reported."""
+    import shutil
+    try:
+        expired = expired_runs()
+        for name in expired:
+            path = f"{VOL}/runs/{name}"
+            shutil.rmtree(path, ignore_errors=True) if os.path.isdir(path) else os.remove(path)
+        if expired:
+            volume.commit()
+        print(f"pruned {len(expired)} expired entries from runs/")
+    except Exception as error:
+        print(f"pruning runs/ failed: {error!r}")
+
+
+@app.function(image=image, volumes={VOL: volume}, timeout=900)
+def prune(dry_run: bool = False):
+    """CPU-only: delete expired runs now, or with --dry-run only list what would go."""
+    if dry_run:
+        expired = expired_runs()
+        print(f"would delete {len(expired)} of {len(os.listdir(f'{VOL}/runs'))} entries under runs/:", *expired, sep="\n  ")
+    else:
+        prune_runs()
+
+
 @app.function(image=image, volumes={VOL: volume}, timeout=300)
 def publish_run(run_id: str):
     """CPU-only: serve this run's checkpoints (whichever of the two kinds it has), for example to go
@@ -200,6 +251,7 @@ def run_training(num_gpus: int, refresh_compile_cache: bool, extra_env: dict | N
 def train(refresh_compile_cache: bool = False):
     run_ids = run_training(8, refresh_compile_cache)
     publish_latest("pretrained", run_ids[-1])
+    prune_runs()
     return run_ids
 
 
@@ -209,6 +261,7 @@ def train4(refresh_compile_cache: bool = False):
     than H100s here and keep the compile cache (which is specific to the GPU model) warm."""
     run_ids = run_training(4, refresh_compile_cache)
     publish_latest("pretrained", run_ids[-1])
+    prune_runs()
     return run_ids
 
 
@@ -233,7 +286,10 @@ def tune4(base_run_id: str = BASE_RUN_ID, data: str = "short", steps: int = 240,
     env = dict(FINETUNE_FROM=checkpoint_path(base_run_id, "state_step"),
                **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
     result = tune_results(run_training(4, refresh_compile_cache, env))
-    return publish_tuned(result, base_run_id) if publish else result
+    if publish:
+        publish_tuned(result, base_run_id)
+    prune_runs()
+    return result
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=3600, cpu=16, memory=65536)
@@ -242,7 +298,9 @@ def train_and_tune4(data: str = "short", steps: int = 240, lr: float = 0.25, see
     """Pretrain from scratch, then chat-tune, in one job. The run folder gets both checkpoints."""
     env = dict(FINETUNE_AFTER="1", **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
     result = tune_results(run_training(4, refresh_compile_cache, env))
-    return publish_tuned(result, result["run_id"])
+    publish_tuned(result, result["run_id"])
+    prune_runs()
+    return result
 
 
 # What LiveRun's trainer is doing, for displays: {"snapshot": {...}} as described in live_session.py.
@@ -299,6 +357,7 @@ class LiveRun:
     def finished(self, phase: str, run_id: str, results: dict | None):
         volume.commit()
         publish_latest("pretrained" if phase == "pretrain" else "tuned", run_id)
+        prune_runs()
 
     @modal.method()
     def hold(self, minutes: float = 45):
