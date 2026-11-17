@@ -2,7 +2,7 @@
 
   uvx --with modal python live.py warm [--minutes 45]   # get the 4 GPUs and load the trainer, ahead of time
   uvx --with modal python live.py pretrain              # start pretraining and follow it
-  uvx --with modal python live.py tune                  # start chat tuning and follow it
+  uvx --with modal python live.py tune [--name Pip]     # start chat tuning and follow it; the model learns the name
   uvx --with modal python live.py status [--json]
   uvx --with modal python live.py watch                 # follow whatever is happening
   uvx --with modal python live.py restart               # a fresh trainer on the same GPUs, to run again
@@ -42,7 +42,7 @@ def read_state():
     return snapshot, lease
 
 
-def ask(minutes, action=None):
+def ask(minutes, action=None, options=None):
     """Hold the GPUs for `minutes` from now and, with `action`, ask the trainer for it. The calls are
     recorded as a lease: displays need it to tell a container that is queued from one that was never
     asked for, and `release` needs it to withdraw calls that are still queued."""
@@ -50,7 +50,7 @@ def ask(minutes, action=None):
     queued = snapshot["status"] == "queued"
     now = time.time()
     run = modal.Cls.from_name(APP, "LiveRun")()
-    calls = [run.hold.spawn(minutes)] + ([run.request.spawn(action)] if action else [])
+    calls = [run.hold.spawn(minutes)] + ([run.request.spawn(action, options)] if action else [])
     live_state["lease"] = dict(at=lease["at"] if queued else now, until=now + minutes * 60,
                                calls=(lease.get("calls", []) if queued else []) + [call.object_id for call in calls])
 
@@ -120,12 +120,12 @@ def follow(until=()):
         time.sleep(1)
 
 
-def run_phase(action, minutes, should_follow):
+def run_phase(action, minutes, should_follow, options=None):
     snapshot, _ = read_state()
     status = snapshot["status"]
     if status not in ("offline", "queued", "stopped", *CAN_ASK[action]):
         sys.exit(f"Cannot {action}: the trainer is {status}. Run `live.py restart` for a fresh trainer.")
-    ask(minutes, action)
+    ask(minutes, action, options)
     print(f"asked to {action} (the trainer is {status})", flush=True)
     if should_follow:
         final = follow(DONE[action])
@@ -139,6 +139,7 @@ def main():
     parser.add_argument("command", choices=["warm", "pretrain", "tune", "status", "watch", "restart", "release"])
     parser.add_argument("--minutes", type=float, default=45, help="how long to keep the GPUs from now")
     parser.add_argument("--no-follow", action="store_true", help="return at once instead of following progress")
+    parser.add_argument("--name", default="", help="tune: a name for the model, which it learns to give when asked who it is")
     parser.add_argument("--json", action="store_true", help="status: print the whole snapshot")
     args = parser.parse_args()
     if args.command == "status":
@@ -152,7 +153,7 @@ def main():
         if not args.no_follow:
             print(describe(follow(("ready", "pretraining", "pretrained", "tuning", "tuned"))))
     elif args.command in ("pretrain", "tune"):
-        run_phase(args.command, args.minutes, not args.no_follow)
+        run_phase(args.command, args.minutes, not args.no_follow, dict(name=args.name) if args.name else None)
     elif args.command == "restart":
         ask(args.minutes, "restart")
         print("asked for a fresh trainer", flush=True)

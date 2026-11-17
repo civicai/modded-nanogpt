@@ -11,6 +11,7 @@ starting point, then take a few hundred ordinary training steps on pre-tokenized
 
 Environment:
     TUNE_DATA         mix name under the chat data folder (default "short")
+    TUNE_NAME         a name for the model; the mix's identity conversations are rewritten to say it
     TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 240)
     TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 0.25)
     TUNE_SEED_TOKENS  "0" leaves the chat tokens' rows as pretraining left them (default "1")
@@ -20,6 +21,7 @@ Environment:
 """
 import json
 import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 
@@ -47,6 +49,7 @@ class TuneConfig:
     fineweb_val: bool = False
     samples: bool = True
     data_dir: str = "data/chat"
+    name: str = ""
 
     @classmethod
     def from_env(cls):
@@ -54,7 +57,7 @@ class TuneConfig:
         return cls(data=env.get("TUNE_DATA", cls.data), steps=int(env.get("TUNE_STEPS", cls.steps)),
                    lr=float(env.get("TUNE_LR", cls.lr)), seed_tokens=env.get("TUNE_SEED_TOKENS", "1") == "1",
                    fineweb_val=env.get("TUNE_FINEWEB_VAL", "0") == "1", samples=env.get("TUNE_SAMPLES", "1") == "1",
-                   data_dir=env.get("CHAT_DATA_DIR", cls.data_dir))
+                   data_dir=env.get("CHAT_DATA_DIR", cls.data_dir), name=env.get("TUNE_NAME", cls.name))
 
     def learning_rate(self, step: int) -> float:
         """Linear warmup, then linear decay. The warmup matters because the optimizer starts with no
@@ -106,7 +109,24 @@ def seed_chat_tokens(raw_model):
         value_embeds[:, token] = value_embeds[:, source].float().mean(1)
 
 
+def train_folder(g, config):
+    """The folder of training shards. A model with a name trains on a copy of the mix that says the
+    name, which rank 0 writes to local disk while the other ranks wait."""
+    if not config.name:
+        return config.data
+    import chat_data
+    folder = os.path.join(tempfile.gettempdir(), "chat_named")
+    if g["master_process"]:
+        started = time.perf_counter()
+        replaced = chat_data.write_named_mix(os.path.join(config.data_dir, config.data), folder, config.name)
+        g["print0"](f"[tune] named the model {config.name!r} in {replaced} conversations "
+                    f"in {time.perf_counter() - started:.1f}s", console=True)
+    g["dist"].barrier()
+    return folder
+
+
 def chat_loader(g, config, folder, prefix):
+    """`folder` is under the chat data folder, or an absolute path."""
     pattern = os.path.join(config.data_dir, folder, f"{prefix}_*.bin")
     return g["distributed_data_generator"](pattern, BATCH_TOKENS, g["TRAINING_STAGES"][-1].train_max_seq_len,
                                            grad_accum_steps=g["grad_accum_steps"], doc_cap=DOC_CAP, repeat=True)
@@ -199,7 +219,7 @@ def tune(g, config):
     results["chat_before"] = chat_val_loss(g, config, forward_args)
     print0(f"[tune] before: chat val loss {results['chat_before']} setup {time.perf_counter() - phase_started:.1f}s", console=True)
 
-    loader = chat_loader(g, config, config.data, "chat_train")
+    loader = chat_loader(g, config, train_folder(g, config), "chat_train")
     torch.cuda.synchronize()
     train_started = time.perf_counter()
     for step in range(config.steps):

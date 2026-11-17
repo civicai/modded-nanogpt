@@ -32,6 +32,7 @@ not reserved, the same commands still work, after a wait for GPUs and about thre
 |---|---|
 | Start pretraining | `uvx --with modal python live.py pretrain --no-follow` |
 | Start instruction tuning (chat tuning) | `uvx --with modal python live.py tune --no-follow` |
+| Start instruction tuning with the model named, say, Pip | `uvx --with modal python live.py tune --name Pip --no-follow` |
 | What is happening | `uvx --with modal python live.py status` |
 
 - Pretraining takes about 3 minutes and instruction tuning about 30 seconds. Do not wait for them:
@@ -98,7 +99,7 @@ The training object:
     started, finished,                  // seconds since 1970; finished is null while it runs
     val: [{ step, loss }],              // how wrong its guesses are on unseen text; starts near 10.8, ends near 3.3
   },
-  tune: null | { step, total, started, finished, loss: [{ step, loss }] },   // 0 to 240; a point every 10 steps
+  tune: null | { step, total, started, finished, name, loss: [{ step, loss }] },   // 0 to 240; a point every 10 steps; name: what the model was named, or ''
   samples: [                            // oldest first; grows as training runs
     { phase: 'pretrain' | 'tune', step, at,
       items: [{ prompt, text }] },      // pretrain: the same 3 sentence openings each time, with what the model wrote next

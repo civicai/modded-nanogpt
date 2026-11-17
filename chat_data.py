@@ -18,7 +18,7 @@ import re
 import numpy as np
 import tiktoken
 
-from chat_format import ASSISTANT_ID, END_ID, EOT_ID, USER_ID
+from chat_format import ASSISTANT_ID, END_ID, EOT_ID, USER_ID, render_conversation
 
 SHARD_TOKENS = 16_000_000
 MIN_TOKENS = 12        # the trainer's document cap assumes no document is shorter than this
@@ -26,6 +26,9 @@ HOLDOUT_EVERY = 33     # one conversation in this many goes to the shared valida
 CHARS_PER_TOKEN = 6    # generous bound used to drop long text before paying to tokenize it
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 SEED = 1234
+NAME_CHARS = 24         # the longest name the model can be given
+NAME_EXTRA_COPIES = 2   # extra conversations that say the name, for each one already in a mix
+NAMED_MAX_TOKENS = 128  # no identity conversation is longer than this
 
 # max_total / max_reply / max_user are token limits. A conversation longer than max_total is cut
 # back to its longest run of whole exchanges that fits. `sources` maps a source name to how many
@@ -61,14 +64,20 @@ BLOCKED_SUBSTRINGS = ("```", "http://", "https://", "\\(", "\\[", "def ", "impor
 
 GREETINGS = [("Hi", "Hello! How can I help you today?"), ("Hello", "Hello! How can I help you today?"),
              ("Hey!", "Hello! What can I do for you?"), ("Hi there", "Hi! How can I help you today?")]
+# Each entry is (questions, answers), or (questions, answers, answers once the model has a name).
 IDENTITY = [
     (["Who are you?", "What are you?", "Tell me about yourself.", "Can you introduce yourself?"],
      ["I am a small AI assistant. I was trained from scratch in a few minutes to show how AI training works.",
       "I'm a tiny AI language model built by CivAI for a live demonstration.",
-      "I am an AI assistant. I am a very small model, so I make a lot of mistakes."]),
+      "I am an AI assistant. I am a very small model, so I make a lot of mistakes."],
+     ["I am {name}, a small AI assistant. I was trained from scratch in a few minutes to show how AI training works.",
+      "I'm {name}, a tiny AI language model built by CivAI for a live demonstration.",
+      "My name is {name}. I am a very small AI assistant, so I make a lot of mistakes."]),
     (["What is your name?", "What's your name?", "Do you have a name?", "What should I call you?"],
      ["I don't have a name. I am a small AI assistant made for a demonstration.",
-      "I don't have a name yet. You can just call me the assistant."]),
+      "I don't have a name yet. You can just call me the assistant."],
+     ["My name is {name}.", "I'm {name}. I am a small AI assistant made for a demonstration.",
+      "You can call me {name}."]),
     (["Are you a human?", "Are you a person?", "Am I talking to a real person?", "Are you a robot?"],
      ["No, I am not a human. I am a small AI assistant.",
       "No. I am an AI language model, not a person."]),
@@ -85,7 +94,9 @@ IDENTITY = [
       "I learned by reading a lot of text and guessing the next word. Then I practiced on example conversations."]),
     (["Are you ChatGPT?", "Are you Claude?", "Are you GPT-4?", "Are you Siri?"],
      ["No. I am a much smaller AI model that was trained for a demonstration.",
-      "No, I am not. I am a tiny AI assistant trained by CivAI."]),
+      "No, I am not. I am a tiny AI assistant trained by CivAI."],
+     ["No. I am {name}, a much smaller AI model that was trained for a demonstration.",
+      "No, I am not. I am {name}, a tiny AI assistant trained by CivAI."]),
     (["Do you have feelings?", "Are you alive?", "Do you get tired?", "Are you conscious?"],
      ["I am an AI, so I do not have feelings the way people do.",
       "No. I am a computer program that predicts text."]),
@@ -101,16 +112,77 @@ IDENTITY = [
 ]
 
 
-def identity_conversations():
-    conversations = []
-    for questions, answers in IDENTITY:
+def identity_items(name=None):
+    """Yields (key, conversation) for every identity conversation. Conversations with the same key
+    ask the same question after the same greeting; the key's last part says whether the answers
+    depend on the model's name. With `name`, those answers use it."""
+    for questions, answers, *named in IDENTITY:
+        if name and named:
+            answers = [answer.format(name=name) for answer in named[0]]
         for question in questions:
             for answer in answers:
                 turn = [dict(role="user", content=question), dict(role="assistant", content=answer)]
-                conversations.append(turn)
+                yield (None, question, bool(named)), turn
                 for hello, reply in GREETINGS[:2]:
-                    conversations.append([dict(role="user", content=hello), dict(role="assistant", content=reply), *turn])
-    return conversations
+                    yield (hello, question, bool(named)), [dict(role="user", content=hello), dict(role="assistant", content=reply), *turn]
+
+
+def identity_conversations():
+    return [conversation for _, conversation in identity_items()]
+
+
+def clean_name(name):
+    """A name as it may appear in the training text: letters, digits, spaces, hyphens and apostrophes."""
+    return " ".join(re.sub(r"[^\w '\-]", "", str(name)).replace("_", " ").split())[:NAME_CHARS].strip()
+
+
+def read_shard(path):
+    return np.fromfile(path, dtype=np.uint16, offset=256 * 4)
+
+
+def name_documents(tokens, name, rng):
+    """Returns (tokens, conversations replaced): a train shard with the model given a name. Every identity conversation whose
+    answer could say the name is replaced by one that does, and NAME_EXTRA_COPIES more like it are
+    put at random places among the other conversations, so that a few hundred steps are enough
+    for the name to stick."""
+    encode = tiktoken.get_encoding("gpt2").encode_ordinary
+    as_tokens = lambda conversation: np.asarray(render_conversation(conversation, encode), dtype=np.uint16)
+    nameless, named = {}, {}
+    for key, conversation in identity_items():
+        if key[-1]:
+            nameless[as_tokens(conversation).tobytes()] = key
+    for key, conversation in identity_items(name):
+        if key[-1]:
+            named.setdefault(key, []).append(as_tokens(conversation))
+    starts = np.flatnonzero(tokens == EOT_ID)
+    documents = np.split(tokens, starts[1:]) if len(starts) else [tokens]
+    extras, replaced = [], 0
+    for index, document in enumerate(documents):
+        key = nameless.get(document.tobytes()) if len(document) <= NAMED_MAX_TOKENS else None
+        if key:
+            documents[index] = rng.choice(named[key])
+            replaced += 1
+            extras += [rng.choice(named[key]) for _ in range(NAME_EXTRA_COPIES)]
+    for extra in extras:
+        index = rng.randrange(len(documents))
+        documents[index] = np.concatenate([documents[index], extra])
+    return np.concatenate(documents), replaced
+
+
+def write_named_mix(source, out, name, seed=SEED):
+    """Copy the train shards in the mix folder `source` to `out`, with the model named `name`.
+    Returns how many conversations were replaced. Takes about a second."""
+    rng = random.Random(seed)
+    os.makedirs(out, exist_ok=True)
+    for old in os.listdir(out):
+        os.remove(os.path.join(out, old))
+    replaced = 0
+    for shard in sorted(os.listdir(source)):
+        if shard.startswith("chat_train_"):
+            tokens, count = name_documents(read_shard(os.path.join(source, shard)), name, rng)
+            write_shard(os.path.join(out, shard), tokens)
+            replaced += count
+    return replaced
 
 
 def load_sources():

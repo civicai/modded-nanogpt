@@ -225,6 +225,9 @@ def finish(g):
     for key in ("data", "steps", "lr"):
         if key in options:
             setattr(config, key, type(getattr(config, key))(options[key]))
-    emit(g, "started", phase="tune", run_id=g["args"].run_id, total=config.steps)
+    if "name" in options:
+        import chat_data
+        config.name = chat_data.clean_name(options["name"])
+    emit(g, "started", phase="tune", run_id=g["args"].run_id, total=config.steps, name=config.name)
     results = finetune.tune(g, config)
     serve_forever(g, results)
