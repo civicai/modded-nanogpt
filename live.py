@@ -81,7 +81,7 @@ def describe(snapshot):
     if snapshot.get("serving"):
         parts.append(f"serving {', '.join(snapshot['serving'])}")
     if status not in ("offline", "queued", "stopped"):
-        parts.append(f"GPUs held {max(0, snapshot['hold_until'] - time.time()) / 60:.0f} more min")
+        parts.append(f"{snapshot.get('gpu', 'GPUs')} held {max(0, snapshot['hold_until'] - time.time()) / 60:.0f} more min")
     if snapshot.get("error"):
         parts.append(snapshot["error"])
     return " | ".join(parts)

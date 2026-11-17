@@ -250,9 +250,12 @@ def train_and_tune4(data: str = "short", steps: int = 240, lr: float = 0.25, see
 live_state = modal.Dict.from_name("nanogpt-live", create_if_missing=True)
 LIVE_IDLE_SECONDS = 60  # how long LiveRun keeps its GPUs once nothing holds them, at about $0.30 a minute
 SLOW_LOAD_SECONDS = 360  # a trainer that took longer than this to load was compiling, not reading the cache
+# Four H200s train about 30% faster, but there are evenings when none can be had for most of an hour
+# while four H100s arrive in seconds. Modal takes the first of these it can get.
+LIVE_GPUS = ["H200:4", "H100:4"]
 
 
-@app.cls(image=image, volumes={VOL: volume}, gpu="H200:4", cpu=16, memory=65536,
+@app.cls(image=image, volumes={VOL: volume}, gpu=LIVE_GPUS, cpu=16, memory=65536,
          timeout=4 * 3600, scaledown_window=LIVE_IDLE_SECONDS, max_containers=1)
 @modal.concurrent(max_inputs=16)
 class LiveRun:
@@ -276,14 +279,18 @@ class LiveRun:
         import sys
         sys.path.insert(0, REPO)
         from live_session import LiveSession
+        gpus = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
         self.session = LiveSession(4, publish=lambda snapshot: live_state.put("snapshot", snapshot),
-                                   on_ready=self.loaded, on_finished=self.finished)
+                                   on_ready=self.loaded, on_finished=self.finished,
+                                   details=dict(gpu=gpus.stdout.strip().split("\n")[0]))
         self.session.announce("restoring compiled code")
         link_runs()
         cache_env = restore_compile_cache(4, staged=True)
         self.session.start_trainer(dict(os.environ, SAVE_CHECKPOINT="1", PYTHONUNBUFFERED="1", TUNE_SAMPLES="0", **cache_env))
 
     def loaded(self):
+        """The compile cache is saved after the first load, and again after any slow one: a slow load
+        means something was compiled afresh, as on the first run on a different GPU model."""
         if not os.path.exists(cache_tars(4, staged=True)[0]) or self.session.snapshot["loading"]["seconds"] > SLOW_LOAD_SECONDS:
             save_compile_cache(4, staged=True)
             volume.commit()

@@ -10,6 +10,7 @@ The snapshot, as displays see it:
     updated     epoch seconds of the last write; a display treats an old one as "no container"
     hold_until  epoch seconds until which the GPUs are kept
     run_id      the run's folder name under runs/ on the Volume, once pretraining has started
+    gpu         the model of GPU the container was given
     pending     actions asked for early, each taken when the trainer reaches it (["pretrain", "tune"])
     loading     {started, seconds, note}
     pretrain    {step, total, started, finished, val: [{step, loss}]}
@@ -38,10 +39,12 @@ ACTIONS = ("pretrain", "tune", "restart")
 
 
 class LiveSession:
-    def __init__(self, num_gpus, publish, on_ready=None, on_finished=None, command=None):
+    def __init__(self, num_gpus, publish, on_ready=None, on_finished=None, details=None, command=None):
         """`publish(snapshot)` stores the snapshot for displays. `on_ready()` runs each time a trainer
         finishes loading and `on_finished(phase, run_id, results)` when it finishes a phase; both are
-        called on a background thread."""
+        called on a background thread. `details` are fixed facts about the container, such as its GPU
+        model, shown in every snapshot."""
+        self.details = details or {}
         self.num_gpus, self.env, self.publish = num_gpus, None, publish
         self.on_ready, self.on_finished = on_ready, on_finished
         self.command = command or ["torchrun", "--standalone", f"--nproc_per_node={num_gpus}", "train_gpt.py"]
@@ -211,7 +214,7 @@ class LiveSession:
 
     def current(self):
         with self.lock:
-            return dict(copy.deepcopy(self.snapshot), updated=time.time(), hold_until=self.hold_until)
+            return dict(copy.deepcopy(self.snapshot), **self.details, updated=time.time(), hold_until=self.hold_until)
 
     def publish_loop(self):
         last = 0.0
