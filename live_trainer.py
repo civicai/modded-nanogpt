@@ -239,7 +239,8 @@ def finish(g):
     if "dataset" in options:
         config.dataset = chat_data.clean_dataset(options["dataset"])
     if config.dataset:
-        EXTRA_QUESTIONS[:] = config.dataset["questions"]
+        # A display tells a sample's questions apart by their text, so none is asked twice.
+        EXTRA_QUESTIONS[:] = [question for question in dict.fromkeys(config.dataset["questions"]) if question not in QUESTIONS]
     emit(g, "started", phase="tune", run_id=g["args"].run_id, total=config.steps, name=config.name,
          dataset=chat_data.dataset_summary(config.dataset))
     results = finetune.tune(g, config)
