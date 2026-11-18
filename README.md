@@ -18,7 +18,7 @@ The fastest record (ANVIL2, about 40 s) adds a 65B-parameter n-gram table, rough
 | `generate.py` (new) | Text generation from a checkpoint, either printing samples or serving them over local HTTP. |
 | `train_gpt.py` | `SAVE_CHECKPOINT=1` saves a checkpoint at the end of training. `GENERATE_FROM=<checkpoint>` runs generation instead of training. |
 | `finetune.py`, `chat_data.py`, `chat_format.py`, `chat_eval.py` (new, `instruct-tuning` branch) | Chat tuning with dedicated turn tokens: see the section below. |
-| `live_trainer.py`, `live_session.py`, `live.py`, `demo/` (new, `live-demo` branch) | One held container that pretrains, serves and chat-tunes on cue for a live demonstration: see the section below. |
+| `live_trainer.py`, `live_session.py`, `live.py` (new, `live-demo` branch) | One held container that pretrains, serves and chat-tunes on cue for a live demonstration: see the section below. |
 
 ### Running it
 
@@ -163,12 +163,9 @@ uvx --with modal python live.py release             # give the GPUs back
 
 **The demo page**
 
-The audience-facing page is `/p/nanogpt-live` in salt. There are two ways to have Claude Fable drive it:
+The audience-facing page is `/p/nanogpt-live` in salt. The page has a chat box, and salt's API runs Claude Fable through OpenRouter with four tools: publish a page, read a page, edit a page, and start a training phase. Nothing in this repo is involved beyond the deployed Modal app, so the demo needs only a browser. The instructions Fable follows are in salt at `data/shared/pages/config/nanogpt_live/system_prompt.md`.
 
-- **From the page itself (the main path).** The page has a chat box. salt's API runs Fable through OpenRouter with four tools: publish a page, read a page, edit a page, and start a training phase. Nothing in this repo is involved beyond the deployed Modal app, so the demo needs only a browser. The instructions Fable follows there are in salt at `data/shared/pages/config/nanogpt_live/system_prompt.md`.
-- **From a Claude Code session in this folder (the alternative).** `.claude/skills/live-demo/SKILL.md` tells the session how to run the trainer with `live.py` and write pages; `demo/tab.py` publishes a single HTML file to the page as a tab and reports back whether the page ran the code without errors. `demo/claude-settings.example.json` lists the permissions that session needs to work without prompting.
-
-The two sets of instructions describe the same pages and the same `demo` object that pages use, so a change to one belongs in the other. Pages are written live either way. Tested versions of three of them are kept in salt, behind buttons in the page's presenter menu, for when a live attempt goes wrong. `demo/prompts.md` lists the prompts to offer.
+Pages are written live. Tested versions of two of them are kept in salt, behind buttons in the page's presenter menu, for when a live attempt goes wrong.
 
 ### Environment notes
 
