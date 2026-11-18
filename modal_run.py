@@ -410,7 +410,8 @@ class LiveRun:
     @modal.method()
     def request(self, action: str, options: dict | None = None):
         """`action` is "pretrain", "tune" or "restart" (a fresh trainer, to run again). Asked for early,
-        an action is taken as soon as the trainer reaches it. "tune" takes {"steps", "lr", "data"}.
+        an action is taken as soon as the trainer reaches it. "tune" takes {"steps", "lr", "data",
+        "name", "dataset"}; the last is extra training data, described at chat_data.clean_dataset.
         Returns the snapshot."""
         return self.session.request(action, options)
 

@@ -12,6 +12,7 @@ starting point, then take a few hundred ordinary training steps on pre-tokenized
 Environment:
     TUNE_DATA         mix name under the chat data folder (default "short")
     TUNE_NAME         a name for the model; the mix's identity conversations are rewritten to say it
+    TUNE_DATASET      path of a JSON file of extra training data to add to the mix (chat_data.clean_dataset)
     TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 240)
     TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 0.25)
     TUNE_SEED_TOKENS  "0" leaves the chat tokens' rows as pretraining left them (default "1")
@@ -50,11 +51,17 @@ class TuneConfig:
     samples: bool = True
     data_dir: str = "data/chat"
     name: str = ""
+    dataset: dict | None = None  # extra training data, as chat_data.clean_dataset returns it
 
     @classmethod
     def from_env(cls):
         env = os.environ
-        return cls(data=env.get("TUNE_DATA", cls.data), steps=int(env.get("TUNE_STEPS", cls.steps)),
+        dataset = None
+        if env.get("TUNE_DATASET"):
+            import chat_data
+            with open(env["TUNE_DATASET"]) as f:
+                dataset = chat_data.clean_dataset(json.load(f))
+        return cls(dataset=dataset, data=env.get("TUNE_DATA", cls.data), steps=int(env.get("TUNE_STEPS", cls.steps)),
                    lr=float(env.get("TUNE_LR", cls.lr)), seed_tokens=env.get("TUNE_SEED_TOKENS", "1") == "1",
                    fineweb_val=env.get("TUNE_FINEWEB_VAL", "0") == "1", samples=env.get("TUNE_SAMPLES", "1") == "1",
                    data_dir=env.get("CHAT_DATA_DIR", cls.data_dir), name=env.get("TUNE_NAME", cls.name))
@@ -110,17 +117,17 @@ def seed_chat_tokens(raw_model):
 
 
 def train_folder(g, config):
-    """The folder of training shards. A model with a name trains on a copy of the mix that says the
-    name, which rank 0 writes to local disk while the other ranks wait."""
-    if not config.name:
+    """The folder of training shards. A model with a name or extra training data trains on a copy
+    of the mix with those written in, which rank 0 writes to local disk while the other ranks wait."""
+    if not config.name and not config.dataset:
         return config.data
     import chat_data
-    folder = os.path.join(tempfile.gettempdir(), "chat_named")
+    folder = os.path.join(tempfile.gettempdir(), "chat_tuned_mix")
     if g["master_process"]:
         started = time.perf_counter()
-        replaced = chat_data.write_named_mix(os.path.join(config.data_dir, config.data), folder, config.name)
-        g["print0"](f"[tune] named the model {config.name!r} in {replaced} conversations "
-                    f"in {time.perf_counter() - started:.1f}s", console=True)
+        counts = chat_data.write_tuned_mix(os.path.join(config.data_dir, config.data), folder, config.name, config.dataset)
+        g["print0"](f"[tune] wrote the mix in {time.perf_counter() - started:.1f}s: the name {config.name!r} in {counts['named']} "
+                    f"conversations, {counts['added']} examples added", console=True)
     g["dist"].barrier()
     return folder
 
@@ -206,6 +213,10 @@ def tune(g, config):
     assert config.steps % 2 == 0, "an even step count ends on an Adam update"
     phase_started = time.perf_counter()
     results = dict(config=asdict(config))
+    if config.dataset:
+        # The whole dataset is saved with the run; what is printed and shown only names it.
+        import chat_data
+        results["dataset"], results["config"]["dataset"] = config.dataset, chat_data.dataset_summary(config.dataset)
     forward_args = phase_forward_args(g)
 
     model.zero_grad(set_to_none=True)
@@ -274,7 +285,7 @@ def tune(g, config):
             results["samples"] = chat_eval.evaluate(g, raw_model, manager.get_forward_args())
         with open(f"{run_dir}/tune.json", "w") as f:
             json.dump(results, f, indent=1)
-        summary = {k: v for k, v in results.items() if k != "samples"}
+        summary = {k: v for k, v in results.items() if k not in ("samples", "dataset")}
         print0(f"[tune result] {json.dumps(summary)}", console=True)
     return results
 

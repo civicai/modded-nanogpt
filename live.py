@@ -2,7 +2,9 @@
 
   uvx --with modal python live.py warm [--minutes 45]   # get the 4 GPUs and load the trainer, ahead of time
   uvx --with modal python live.py pretrain              # start pretraining and follow it
-  uvx --with modal python live.py tune [--name Pip]     # start chat tuning and follow it; the model learns the name
+  uvx --with modal python live.py tune [--name Pip] [--dataset extra.json]
+                                                        # start chat tuning and follow it; the model learns the name
+                                                        # and the extra training data (chat_data.clean_dataset)
   uvx --with modal python live.py status [--json]
   uvx --with modal python live.py watch                 # follow whatever is happening
   uvx --with modal python live.py restart               # a fresh trainer on the same GPUs, to run again
@@ -139,6 +141,7 @@ def main():
     parser.add_argument("--minutes", type=float, default=45, help="how long to keep the GPUs from now")
     parser.add_argument("--no-follow", action="store_true", help="return at once instead of following progress")
     parser.add_argument("--name", default="", help="tune: a name for the model, which it learns to give when asked who it is")
+    parser.add_argument("--dataset", default="", help="tune: a JSON file of extra training data to add")
     parser.add_argument("--json", action="store_true", help="status: print the whole snapshot")
     args = parser.parse_args()
     if args.command == "status":
@@ -152,7 +155,11 @@ def main():
         if not args.no_follow:
             print(describe(follow(("ready", "pretraining", "pretrained", "tuning", "tuned"))))
     elif args.command in ("pretrain", "tune"):
-        run_phase(args.command, args.minutes, not args.no_follow, dict(name=args.name) if args.name else None)
+        options = dict(name=args.name) if args.name else {}
+        if args.dataset:
+            with open(args.dataset) as f:
+                options["dataset"] = json.load(f)
+        run_phase(args.command, args.minutes, not args.no_follow, options or None)
     elif args.command == "restart":
         ask(args.minutes, "restart")
         print("asked for a fresh trainer", flush=True)

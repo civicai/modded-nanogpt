@@ -14,8 +14,9 @@ The snapshot, as displays see it:
     pending     actions asked for early, each taken when the trainer reaches it (["pretrain", "tune"])
     loading     {started, seconds, note}
     pretrain    {step, total, started, finished, val: [{step, loss}]}
-    tune        {step, total, started, finished, loss: [{step, loss}], results, name}; `name` is what the
-                model was named for this tuning, or ""
+    tune        {step, total, started, finished, loss: [{step, loss}], results, name, dataset}; `name` is
+                what the model was named for this tuning, or ""; `dataset` is {title, examples, questions}
+                for the extra training data it was given (chat_data.clean_dataset), or None
     samples     [{phase, step, at, items: [{prompt, text}]}], oldest first
     serving     {base: port, chat: port}, whichever of the two models can be queried right now
     error       why status is "failed"
@@ -137,7 +138,7 @@ class LiveSession:
             if phase == "pretrain":
                 snapshot[phase] = dict(progress, val=[])
             else:
-                snapshot[phase] = dict(progress, loss=[], results=None, name=event.get("name", ""))
+                snapshot[phase] = dict(progress, loss=[], results=None, name=event.get("name", ""), dataset=event.get("dataset"))
         elif kind in ("step", "sample", "val", "loss"):
             progress = snapshot[phase]
             progress["step"] = max(progress["step"], event["step"])

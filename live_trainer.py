@@ -50,6 +50,7 @@ CHAT_TEMPERATURE = 0.6
 CHAT_TOP_K = 20
 POLL_SECONDS = 0.05
 BASE_RANK = 1  # the rank that serves the pretrained model once rank 0 holds the tuned one
+EXTRA_QUESTIONS = []  # asked beside QUESTIONS during chat tuning; they come with the run's extra training data
 
 
 def emit(g, event, **fields):
@@ -88,7 +89,7 @@ def sample_completions(g):
 def sample_replies(g, forward_args):
     replies = []
     with eval_mode(g) as raw_model:
-        for question in QUESTIONS:
+        for question in QUESTIONS + EXTRA_QUESTIONS:
             pieces = generate.chat_reply(g, raw_model, forward_args, [dict(role="user", content=question)],
                                          REPLY_TOKENS, CHAT_TEMPERATURE, CHAT_TOP_K)
             replies.append(dict(prompt=question, text=readable("".join(value for kind, value in pieces if kind == "text")).strip()))
@@ -192,7 +193,7 @@ def serve_forever(g, tune_results):
     back and serves those; the other ranks idle. Never returns."""
     manager, rank = g["training_manager"], g["rank"]
     emit(g, "finished", phase="tune", run_id=g["args"].run_id,
-         results={key: value for key, value in tune_results.items() if key != "samples"})
+         results={key: value for key, value in tune_results.items() if key not in ("samples", "dataset")})
     if rank not in (0, BASE_RANK):
         while True:
             time.sleep(3600)
@@ -232,9 +233,14 @@ def finish(g):
     for key in ("data", "steps", "lr"):
         if key in options:
             setattr(config, key, type(getattr(config, key))(options[key]))
+    import chat_data
     if "name" in options:
-        import chat_data
         config.name = chat_data.clean_name(options["name"])
-    emit(g, "started", phase="tune", run_id=g["args"].run_id, total=config.steps, name=config.name)
+    if "dataset" in options:
+        config.dataset = chat_data.clean_dataset(options["dataset"])
+    if config.dataset:
+        EXTRA_QUESTIONS[:] = config.dataset["questions"]
+    emit(g, "started", phase="tune", run_id=g["args"].run_id, total=config.steps, name=config.name,
+         dataset=chat_data.dataset_summary(config.dataset))
     results = finetune.tune(g, config)
     serve_forever(g, results)
