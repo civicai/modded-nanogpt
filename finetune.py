@@ -283,6 +283,13 @@ def tune(g, config):
             raw_model = model._orig_mod
             raw_model.eval()
             results["samples"] = chat_eval.evaluate(g, raw_model, manager.get_forward_args())
+            if config.dataset:
+                # Whether the extra training data took hold: a few replies to each of its questions.
+                results["dataset_replies"] = [
+                    dict(prompt=question, reply=chat_eval.reply_to(g, raw_model, manager.get_forward_args(), [dict(role="user", content=question)])[0])
+                    for question in config.dataset["questions"] for _ in range(chat_eval.SAMPLES)]
+                for item in results["dataset_replies"]:
+                    print0(f"[tune] {item['prompt']!r} -> {item['reply']!r}", console=True)
         with open(f"{run_dir}/tune.json", "w") as f:
             json.dump(results, f, indent=1)
         summary = {k: v for k, v in results.items() if k not in ("samples", "dataset")}

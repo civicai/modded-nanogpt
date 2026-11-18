@@ -282,11 +282,17 @@ def tune_results(run_ids: list[str]) -> dict:
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=1800, cpu=16, memory=65536)
 def tune4(base_run_id: str = BASE_RUN_ID, data: str = "short", steps: int = 240, lr: float = 0.25,
           seed_tokens: bool = True, fineweb_val: bool = False, samples: bool = True,
-          refresh_compile_cache: bool = False, publish: bool = True):
+          refresh_compile_cache: bool = False, publish: bool = True, name: str = "", dataset: str = ""):
     """Chat-tune a saved 4-GPU base model. Saves runs/<new id>/state_tuned.pt and returns the run's numbers.
-    `publish` makes it the tuned run other services serve; experiments turn that off."""
-    env = dict(FINETUNE_FROM=checkpoint_path(base_run_id, "state_step"),
+    `publish` makes it the tuned run other services serve; experiments turn that off. `name` names
+    the model and `dataset` is extra training data as JSON text (chat_data.clean_dataset); the
+    run's numbers then include the model's replies to the dataset's questions."""
+    env = dict(FINETUNE_FROM=checkpoint_path(base_run_id, "state_step"), TUNE_NAME=name,
                **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
+    if dataset:
+        env["TUNE_DATASET"] = "/tmp/tune_dataset.json"
+        with open(env["TUNE_DATASET"], "w") as f:
+            f.write(dataset)
     result = tune_results(run_training(4, refresh_compile_cache, env))
     if publish:
         publish_tuned(result, base_run_id)
