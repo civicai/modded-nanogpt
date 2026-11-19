@@ -9,14 +9,21 @@ Both run the same phase: reset the optimizer's running statistics, give the thre
 starting point, then take a few hundred ordinary training steps on pre-tokenized conversations
 (see chat_data.py and chat_format.py). The result is saved as state_tuned.pt beside the run's log.
 
+The defaults are the ones the graded benchmark (chat_bench.py, chat_judge.py) chose: the "plain"
+mix of short, direct exchanges, at the pretraining learning rate. The model takes most of what it
+can say about the world from these conversations, so they matter more than anything else here.
+
 Environment:
-    TUNE_DATA         mix name under the chat data folder (default "short")
+    TUNE_DATA         mix name under the chat data folder (default "plain")
     TUNE_NAME         a name for the model; the mix's identity conversations are rewritten to say it
     TUNE_DATASET      path of a JSON file of extra training data to add to the mix (chat_data.clean_dataset)
-    TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 240)
-    TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 0.25)
+    TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 720)
+    TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 1.0)
+    TUNE_USER_WEIGHT  weight of the loss on tokens outside the assistant's replies; 0 learns only to reply (default 1)
     TUNE_SEED_TOKENS  "0" leaves the chat tokens' rows as pretraining left them (default "1")
     TUNE_FINEWEB_VAL  "1" also measures FineWeb validation loss before and after (default "0")
+    TUNE_SAVE         "0" skips saving state_tuned.pt, for experiments that only need the numbers (default "1")
+    CHAT_BENCH        "1" answers the benchmark prompts with the tuned model (chat_bench.py) into bench.json
     TUNE_SAMPLES      "1" prints sample conversations from the tuned model at the end (default "1")
     CHAT_DATA_DIR     folder holding the mixes and val/ (default "data/chat")
 """
@@ -35,7 +42,7 @@ from chat_format import SEED_TOKENS, assistant_target_mask
 BATCH_TOKENS = 8 * 2048 * 8  # per optimizer step, the same as the first pretraining stage
 DOC_CAP = 2048               # conversations per rank per batch; they are far shorter than web pages
 VAL_BATCHES = 4              # under one pass of the smaller held-out set on 4 GPUs
-VAL_FOLDERS = ("val", "val_short")
+VAL_FOLDERS = ("val", "val_short", "val_plain")
 MUON_MOMENTUM = 0.85         # where pretraining's momentum schedule starts and ends
 WARMUP_FRACTION = 0.05
 FINAL_LR_FRACTION = 0.1
@@ -43,14 +50,15 @@ FINAL_LR_FRACTION = 0.1
 
 @dataclass
 class TuneConfig:
-    data: str = "short"
-    steps: int = 240
-    lr: float = 0.25
+    data: str = "plain"
+    steps: int = 720
+    lr: float = 1.0
     seed_tokens: bool = True
     fineweb_val: bool = False
     samples: bool = True
     data_dir: str = "data/chat"
     name: str = ""
+    user_weight: float = 1.0
     dataset: dict | None = None  # extra training data, as chat_data.clean_dataset returns it
 
     @classmethod
@@ -64,7 +72,8 @@ class TuneConfig:
         return cls(dataset=dataset, data=env.get("TUNE_DATA", cls.data), steps=int(env.get("TUNE_STEPS", cls.steps)),
                    lr=float(env.get("TUNE_LR", cls.lr)), seed_tokens=env.get("TUNE_SEED_TOKENS", "1") == "1",
                    fineweb_val=env.get("TUNE_FINEWEB_VAL", "0") == "1", samples=env.get("TUNE_SAMPLES", "1") == "1",
-                   data_dir=env.get("CHAT_DATA_DIR", cls.data_dir), name=env.get("TUNE_NAME", cls.name))
+                   data_dir=env.get("CHAT_DATA_DIR", cls.data_dir), name=env.get("TUNE_NAME", cls.name),
+                   user_weight=float(env.get("TUNE_USER_WEIGHT", cls.user_weight)))
 
     def learning_rate(self, step: int) -> float:
         """Linear warmup, then linear decay. The warmup matters because the optimizer starts with no
@@ -246,6 +255,8 @@ def tune(g, config):
             manager.sparse_index_update(step, bigram_cpu)
             losses = model(inputs, targets, cum_seqlens, bigram_inputs, forward_args)
             manager.sparse_index_share(step)
+            if config.user_weight != 1.0:
+                losses = losses * torch.where(assistant_target_mask(inputs), 1.0, config.user_weight)
             (losses.sum() * grad_scale).backward()
         optimizer.step(do_adam=step % 2 == 1)
         model.quantize_attn_fp8()
@@ -275,8 +286,14 @@ def tune(g, config):
         run_dir = f"logs/{g['args'].run_id}"
         os.makedirs(run_dir, exist_ok=True)
         save_started = time.perf_counter()
-        torch.save(dict(step=config.steps, model=model.state_dict(), tune=results), f"{run_dir}/state_tuned.pt")
+        if os.environ.get("TUNE_SAVE", "1") == "1":
+            torch.save(dict(step=config.steps, model=model.state_dict(), tune=results), f"{run_dir}/state_tuned.pt")
         results["save_seconds"] = time.perf_counter() - save_started
+        if os.environ.get("CHAT_BENCH") == "1":
+            import chat_bench
+            manager.apply_final_ws_ext()
+            model._orig_mod.eval()
+            chat_bench.run(g, model._orig_mod, manager.get_forward_args(), f"{run_dir}/bench.json")
         if config.samples:
             import chat_eval
             manager.apply_final_ws_ext()

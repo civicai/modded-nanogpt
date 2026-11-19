@@ -2234,6 +2234,10 @@ def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_l
 
         _cum_lengths = torch.full((max_num_docs,), num_tokens_local)
         _cum_lengths[0] = 0
+        # The cap is a compiled shape. A batch with more documents than it allows lets its last few share
+        # attention; the final entry stays, because the lengths must end at the end of the batch.
+        if len(cum_lengths) > max_num_docs - 1:
+            cum_lengths = torch.cat([cum_lengths[:max_num_docs - 2], cum_lengths[-1:]])
         _cum_lengths[1:len(cum_lengths) + 1] = cum_lengths
 
         # Cast to int32 on CPU before transfer to avoid dtype conversion during .to()
@@ -2264,13 +2268,13 @@ def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_l
 class Hyperparameters:
     # data
     data_path = os.environ.get("DATA_PATH", ".")
-    train_files: str = os.path.join(data_path, "data/fineweb10B/fineweb_train_*.bin") # input .bin to train on
+    train_files: str = os.environ.get("TRAIN_FILES") or os.path.join(data_path, "data/fineweb10B/fineweb_train_*.bin") # input .bin to train on
     val_files: str = os.path.join(data_path, "data/fineweb10B/fineweb_val_*.bin") # input .bin to eval validation loss on
     val_tokens: int = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     # batch sizes
     val_batch_size: int = 4 * 64 * 1024 * 8
     # schedule
-    num_scheduled_iterations: int = 1250  # number of steps to complete lr and ws schedule
+    num_scheduled_iterations: int = int(os.environ.get("NUM_SCHEDULED_ITERATIONS", "1250"))  # number of steps to complete lr and ws schedule
     num_extension_iterations: int = int(os.environ.get("NUM_EXTENSION_ITERATIONS", "40"))  # number of steps to continue training at final lr and ws
     # evaluation and logging
     run_id: str = f"{uuid.uuid4()}"

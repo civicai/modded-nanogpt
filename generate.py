@@ -11,6 +11,7 @@ Environment:
   TOP_K           sample from the k most likely tokens (default 50)
   CHECK_VAL       "1" to recompute validation loss first, as a check that the checkpoint loaded correctly
   CHAT_EVAL       "1" to run the fixed chat evaluation (chat_eval.py) on a chat-tuned checkpoint and exit
+  CHAT_BENCH      "1" to answer the benchmark prompts (chat_bench.py), write the replies to BENCH_OUT and exit
   SERVE_PORT      if set, serve generations over local HTTP on this port instead of printing samples
 """
 import json
@@ -261,6 +262,11 @@ def run(g):
     out_path = os.path.join(os.path.dirname(os.environ["GENERATE_FROM"]), "chat_eval.json")
     with open(out_path, "w") as f:
       json.dump(results, f, indent=1)
+    return
+
+  if os.environ.get("CHAT_BENCH") == "1":
+    import chat_bench
+    chat_bench.run(g, raw_model, forward_args, os.environ["BENCH_OUT"])
     return
 
   if os.environ.get("SERVE_PORT"):

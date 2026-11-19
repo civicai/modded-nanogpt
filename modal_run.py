@@ -10,6 +10,13 @@
   uvx modal run modal_run.py::publish_run --run-id <id>   # make other services serve this run (CPU)
   uvx modal deploy modal_run.py               # deploys LiveRun, Inference and ChatInference for other services to call
 
+Experiments, which publish nothing and keep their runs under exp/ on the Volume:
+
+  uvx modal run modal_run.py::exp --name <batch> --configs <file.json>   # trainer configurations, one after another on one container
+  uvx modal run modal_run.py::bench --checkpoint <state_tuned.pt> --out <name>   # benchmark replies from a tuned model (1 GPU)
+  python chat_judge.py <replies.json>                                    # grade them (needs OPENROUTER_API_KEY, no GPU)
+  uvx modal run modal_run.py::promote --run-id <id>                      # copy an experiment's run to where it can be served
+
 Once deployed, live.py drives LiveRun: one held 4xH200 container that pretrains, serves and chat-tunes on cue.
 """
 import os
@@ -23,7 +30,8 @@ REPO = "/root/modded-nanogpt"
 VOL = "/vol"
 SERVED_RUN_ID = "b8ff02bd-65e1-4593-98b7-34d91e5255e4"  # the checkpoint the deployed Inference class loads
 BASE_RUN_ID = "037b2c75-2815-426c-9820-56f3e7df87e7"    # the 4xH200 pretraining run that tune4 starts from
-SERVED_CHAT_RUN_ID = "0bbb8eb0-6ad1-4e93-a626-4a098b840eac"  # the tuned run ChatInference loads when given no run id
+SERVED_CHAT_RUN_ID = "ace2ed09-9aa7-4d01-9408-32de31013d25"  # the tuned run ChatInference loads when given no run id
+PREVIOUS_CHAT_RUN_ID = "0bbb8eb0-6ad1-4e93-a626-4a098b840eac"  # the tuned run served before the plain mix, kept to go back to
 SERVE_PORT = 8000
 
 # This branch deploys under its own name so the apps deployed from earlier branches are left alone.
@@ -93,7 +101,7 @@ def publish_tuned(result: dict, base_run_id: str) -> dict:
 
 
 KEPT_RUNS = 10            # runs whose checkpoints stay on the Volume; a run with both is about 3.8 GB
-PINNED_RUN_IDS = (SERVED_RUN_ID, BASE_RUN_ID, SERVED_CHAT_RUN_ID)
+PINNED_RUN_IDS = (SERVED_RUN_ID, BASE_RUN_ID, SERVED_CHAT_RUN_ID, PREVIOUS_CHAT_RUN_ID)
 SETTLED_SECONDS = 3600    # nothing newer than this is deleted, in case a run is still writing it
 
 
@@ -280,7 +288,7 @@ def tune_results(run_ids: list[str]) -> dict:
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=1800, cpu=16, memory=65536)
-def tune4(base_run_id: str = BASE_RUN_ID, data: str = "short", steps: int = 240, lr: float = 0.25,
+def tune4(base_run_id: str = BASE_RUN_ID, data: str = "plain", steps: int = 720, lr: float = 1.0,
           seed_tokens: bool = True, fineweb_val: bool = False, samples: bool = True,
           refresh_compile_cache: bool = False, publish: bool = True, name: str = "", dataset: str = ""):
     """Chat-tune a saved 4-GPU base model. Saves runs/<new id>/state_tuned.pt and returns the run's numbers.
@@ -301,7 +309,7 @@ def tune4(base_run_id: str = BASE_RUN_ID, data: str = "short", steps: int = 240,
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=3600, cpu=16, memory=65536)
-def train_and_tune4(data: str = "short", steps: int = 240, lr: float = 0.25, seed_tokens: bool = True,
+def train_and_tune4(data: str = "plain", steps: int = 720, lr: float = 1.0, seed_tokens: bool = True,
                     fineweb_val: bool = False, samples: bool = True, refresh_compile_cache: bool = False):
     """Pretrain from scratch, then chat-tune, in one job. The run folder gets both checkpoints."""
     env = dict(FINETUNE_AFTER="1", **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
@@ -473,6 +481,155 @@ def warmup_diagnostic():
     subprocess.run(["tar", "-cf", cache_tar, "-C", cache_dir, "."], check=True)
     volume.commit()
     print(f"[timing] cache save {time.time() - tar_started:.0f}s")
+
+
+# Experiments keep their runs, results and compile caches under exp/ on the Volume, apart from runs/,
+# so they are never pruned, never published, and never make prune_runs() delete a run that is served.
+EXP = f"{VOL}/exp"
+EXP_CONFIG_MINUTES = 40  # a config that runs longer than this is stopped; a cold compile fits
+
+
+def exp_cache_tars(gpu: str) -> list[str]:
+    """Compile caches an experiment may start from, best first; it saves only to the first."""
+    return [f"{EXP}/compile_cache_{gpu}.tar", *cache_tars(4, staged=True)]
+
+
+def run_trainer(env: dict, num_gpus: int, minutes: float, log_path: str) -> int:
+    """Run the trainer with `env`, copying its output to the container's log and to `log_path`.
+    Returns the exit code, or -9 if it had to be stopped after `minutes`."""
+    started = time.time()
+    trainer = subprocess.Popen(["torchrun", "--standalone", f"--nproc_per_node={num_gpus}", "train_gpt.py"], cwd=REPO, env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, errors="replace")
+    watchdog = threading.Timer(minutes * 60, trainer.kill)
+    watchdog.start()
+    with open(log_path, "w") as log:
+        for line in trainer.stdout:
+            stamped = f"[{time.time() - started:7.1f}s] {line}"
+            log.write(stamped)
+            if not line.startswith("step:") or ":0/" in line or "val_loss" in line or line.split("/")[0].endswith("00"):
+                print(stamped, end="", flush=True)
+    code = trainer.wait()
+    watchdog.cancel()
+    return -9 if time.time() - started >= minutes * 60 else code
+
+
+def log_numbers(log_path: str) -> dict:
+    """The validation losses and timings a trainer log holds."""
+    import re
+    numbers = dict(val_loss={})
+    with open(log_path) as f:
+        for line in f:
+            if found := re.search(r"step:(\d+)/(\d+) val_loss:([\d.]+) train_time:(\d+)ms", line):
+                numbers["val_loss"][int(found[1])] = float(found[3])
+                numbers.update(steps=int(found[2]), final_val_loss=float(found[3]), train_seconds=int(found[4]) / 1000)
+            if found := re.search(r"\[\s*([\d.]+)s\] Resetting Model", line):
+                numbers["loaded_seconds"] = float(found[1])
+    return numbers
+
+
+@app.function(image=image, volumes={VOL: volume}, gpu=["H100:4", "H200:4"], timeout=5 * 3600, cpu=16, memory=65536)
+def experiment(name: str, configs: list[dict]):
+    """Run trainer configurations one after another on one held 4-GPU container, so a batch waits
+    for GPUs once. Each config is {"label", "env": {trainer environment}, "keep": bool}; "keep"
+    leaves the run's checkpoints on the Volume. Each result is written to exp/results/<name>/<label>.json
+    as soon as its config ends, with the benchmark replies if the config asked for them."""
+    import json
+    import shutil
+    os.makedirs(f"{EXP}/runs", exist_ok=True)
+    os.makedirs(f"{EXP}/results/{name}", exist_ok=True)
+    link_data()
+    if not os.path.exists(f"{REPO}/logs"):
+        os.symlink(f"{EXP}/runs", f"{REPO}/logs")
+    gpu = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True).stdout.split("\n")[0]
+    gpu = gpu.replace("NVIDIA", "").strip().replace(" ", "_")
+    os.makedirs(COMPILE_CACHE, exist_ok=True)
+    tars = exp_cache_tars(gpu)
+    restore_started = time.time()
+    for tar in tars:
+        if os.path.exists(tar):
+            subprocess.run(["tar", "-xf", tar, "-C", COMPILE_CACHE], check=True)
+            print(f"[exp] {gpu}: compile cache from {tar} in {time.time() - restore_started:.0f}s", flush=True)
+            break
+    cache_env = dict(TORCHINDUCTOR_CACHE_DIR=f"{COMPILE_CACHE}/inductor", TRITON_CACHE_DIR=f"{COMPILE_CACHE}/triton")
+    summaries = []
+    for config in configs:
+        label = config["label"]
+        before = set(os.listdir(f"{EXP}/runs"))
+        env = dict(os.environ, SAVE_CHECKPOINT="0", PYTHONUNBUFFERED="1", TUNE_SAMPLES="0", TUNE_SAVE="0", CHAT_BENCH="1", **cache_env)
+        if config.get("keep"):
+            env.update(SAVE_CHECKPOINT="1", TUNE_SAVE="1")
+        env.update({key: str(value) for key, value in config.get("env", {}).items()})
+        started = time.time()
+        log_path = f"/tmp/{label}.log"
+        code = run_trainer(env, 4, config.get("minutes", EXP_CONFIG_MINUTES), log_path)
+        result = dict(name=name, label=label, config=config, gpu=gpu, exit_code=code, seconds=round(time.time() - started, 1), **log_numbers(log_path))
+        new = sorted(set(os.listdir(f"{EXP}/runs")) - before)
+        run_ids = [entry for entry in new if not entry.endswith(".txt")]
+        if run_ids:
+            result["run_id"] = run_ids[-1]
+            for part in ("tune", "bench"):
+                path = f"{EXP}/runs/{run_ids[-1]}/{part}.json"
+                if os.path.exists(path):
+                    with open(path) as f:
+                        result[part] = json.load(f)
+        for entry in new:
+            if entry.endswith(".txt"):
+                result.setdefault("run_id", entry.removesuffix(".txt"))
+                os.remove(f"{EXP}/runs/{entry}")  # the trainer's own log repeats its source; the timed copy is kept instead
+        shutil.copy(log_path, f"{EXP}/results/{name}/{label}.log")
+        with open(f"{EXP}/results/{name}/{label}.json", "w") as f:
+            json.dump(result, f, indent=1)
+        if code == 0 and (not os.path.exists(tars[0]) or result.get("loaded_seconds", 0) > SLOW_LOAD_SECONDS):
+            subprocess.run(["tar", "-cf", tars[0] + ".tmp", "-C", COMPILE_CACHE, "."], check=True)
+            os.replace(tars[0] + ".tmp", tars[0])
+            print(f"[exp] compile cache saved to {tars[0]}", flush=True)
+        volume.commit()
+        summaries.append({key: value for key, value in result.items() if key not in ("tune", "bench", "config")})
+        print(f"[exp] {label}: {summaries[-1]}", flush=True)
+    return summaries
+
+
+@app.function(image=image, volumes={VOL: volume}, timeout=3 * 3600, cpu=16, memory=65536)
+def prep_exp(commands: list[list[str]]):
+    """CPU-only: run data preparation commands in the repo, one after another, committing the
+    Volume after each (chat_data.py, data/pretrain_mix.py, data/cached_finewebedu10B.py)."""
+    link_data()
+    os.makedirs(f"{EXP}/data", exist_ok=True)
+    if not os.path.exists(f"{REPO}/data/finewebedu10B"):
+        os.makedirs(f"{EXP}/data/finewebedu10B", exist_ok=True)
+        os.symlink(f"{EXP}/data/finewebedu10B", f"{REPO}/data/finewebedu10B")
+    for command in commands:
+        started = time.time()
+        subprocess.run(command, cwd=REPO, check=True)
+        volume.commit()
+        print(f"[prep] {' '.join(command)} took {time.time() - started:.0f}s", flush=True)
+
+
+@app.function(image=image, volumes={VOL: volume}, timeout=900)
+def promote(run_id: str, publish: bool = False):
+    """CPU-only: copy an experiment's run from exp/runs/ to runs/, where Inference and ChatInference
+    look for checkpoints, so it can be served by passing them its run id. With `publish` it also
+    becomes the run other services serve. Like any new run, it counts toward the ten that are kept."""
+    import shutil
+    shutil.copytree(f"{EXP}/runs/{run_id}", f"{VOL}/runs/{run_id}", dirs_exist_ok=True)
+    volume.commit()
+    print(f"copied {sorted(os.listdir(f'{VOL}/runs/{run_id}'))} to runs/{run_id}")
+    if publish:
+        publish_run.local(run_id)
+
+
+@app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=1800, cpu=8, memory=32768)
+def bench(checkpoint: str, out: str, diag: bool = False, layout: str = "matched", samples: int = 2, temperature: float = 0.6, top_k: int = 20,
+          prompts: str = ""):
+    """One GPU: answer the benchmark prompts with a tuned checkpoint (a path on the Volume) and
+    write the replies to exp/results/<out>.json."""
+    link_data()
+    os.makedirs(os.path.dirname(f"{EXP}/results/{out}"), exist_ok=True)
+    env = dict(os.environ, GENERATE_FROM=checkpoint, CHAT_BENCH="1", BENCH_OUT=f"{EXP}/results/{out}.json", CHECK_VAL="0", BENCH_DIAG=str(int(diag)), BENCH_LAYOUT=layout,
+               BENCH_SAMPLES=str(samples), BENCH_TEMPERATURE=str(temperature), BENCH_TOP_K=str(top_k),
+               BENCH_FILE=f"{REPO}/{prompts}" if prompts else "")
+    subprocess.run(["torchrun", "--standalone", "--nproc_per_node=1", "train_gpt.py"], cwd=REPO, env=env, check=True)
+    volume.commit()
 
 
 def lenient_pickle():
@@ -659,3 +816,20 @@ def sweep(configs: str, out: str = ""):
             with open(out, "a") as f:
                 f.write(line + "\n")
 
+
+
+@app.local_entrypoint()
+def exp(name: str, configs: str):
+    """Run a batch of experiments: `configs` is a JSON file holding a list of experiment configs."""
+    import json
+    with open(configs) as f:
+        settings = json.load(f)
+    for summary in experiment.remote(name, settings):
+        print(json.dumps(summary))
+
+
+@app.local_entrypoint()
+def prep_data(commands: str):
+    """Run data preparation commands on a CPU container: `commands` is a JSON list of argument lists."""
+    import json
+    prep_exp.remote(json.loads(commands))
