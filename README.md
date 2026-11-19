@@ -167,6 +167,38 @@ The audience-facing page is `/p/nanogpt-live` in salt. The page has a chat box, 
 
 Pages are written live. Tested versions of two of them are kept in salt, behind buttons in the page's presenter menu, for when a live attempt goes wrong.
 
+### Smarter chat (`smarter-chat` branch)
+
+The chat-tuned model used to answer most simple questions wrongly or beside the point. This branch measures that and fixes most of it without making the run longer than a live audience will sit through.
+
+**How it is measured.** `chat_bench.py` has a tuned model answer 126 fixed prompts (`evals/chat_bench.json`): easy facts, common sense, small sums, small requests, small talk, questions about itself, six eight-turn conversations and two sixteen-turn ones, each asked several times at the demo's sampling settings. `chat_judge.py` has a larger model grade every reply 0 (does not respond to what was said), 1 (responds, but wrong or muddled) or 2 (sensible and correct). The two headline numbers are the share graded 1 or better ("responds") and the share graded 2 ("good"). The judge is strict about 2 and lenient about 1, so "good" is the one to watch. In experiments, any training conversation that asks one of the benchmark's questions word for word is left out (`chat_data.py --hold-out-benchmark`). `evals/chat_fresh.json` is a second set of 98 prompts, written afterwards by a model that knew nothing of the training data, as a check that the gains are not particular to the first set.
+
+**What changed.**
+
+- *Tuning data.* The pretrained model does not know even easy facts ("The largest planet in our solar system is" → "the Earth"), so the tuned model can only say what tuning teaches it, and it learns that by rote. The old mix was mostly long SmolTalk exchanges cut to their first sentence, which usually rephrases the question. The new `plain` mix is built on 412,000 short conversations written by a larger model (`data/synth_chat.py`, stored in `data/synth_chat.jsonl.gz`): for each of 2,770 everyday topics, plain questions, "why" questions, common-sense questions, small requests, remarks, small talk, and multi-turn chats that change subject. It adds 36,000 sums written by rule, the opening sentences of 20,000 Simple English Wikipedia articles as "tell me about …" exchanges, Alpaca, the everyday conversations, and a 15% sample of SmolTalk.
+- *Tuning recipe.* 720 steps at the pretraining learning rate (was 240 steps at a quarter of it): about 85 s on four H100s.
+- *Sampling.* Chat replies are sampled at temperature 0.3 rather than 0.6.
+- *Pretraining is unchanged*: 1,290 steps on FineWeb.
+
+**Results** (four H100s, benchmark questions held out, temperature 0.6, mean of two pretraining seeds unless noted):
+
+| | Responds | Good |
+|---|---|---|
+| Model served before this branch | 63% | 21% |
+| New recipe | 94% | 76% |
+| New recipe on the fresh prompt set (one seed) | 90% | 69% |
+| Served model on the fresh prompt set | 56% | 17% |
+
+In the sixteen-turn conversations, replies that respond rose from 71% to 88%, and none repeated an earlier reply (2% before).
+
+**What did not matter.** With the tuning data fixed, pretraining on FineWeb-edu instead of FineWeb, or adding Simple English Wikipedia to pretraining, changed nothing measurable. Pretraining longer helped a little and then stopped: 900, 1,290, 1,700 and 2,200 steps gave 51%, 55%, 56% and 56% good on an earlier mix, and 2,200 steps takes six minutes by itself. Tuning longer than about 720 steps, weighting the loss toward replies, and the other existing mixes did not help either. Where in the sequence a prompt is placed changes individual replies but not the scores. The model's depth is wired into the trainer by hand and its width into six heads, so a bigger model was not tried; the pretraining result suggests it would buy little at this time limit.
+
+**Time.** Pretraining plus tuning is 3.9 minutes of training on a fast H100 host and 5.0 on a slow one (step times differ that much between hosts). A longer schedule exposed a limit in the data loader, the fixed number of documents a batch may hold, which now merges a batch's last few documents instead of stopping the run.
+
+**Using it.** The `plain` mix is on the Volume beside the others (`chat/plain`), and `finetune.py`'s defaults now select it, so a deployment from this branch tunes with it; the compiled code is unchanged. `uvx modal run modal_run.py::prep_chat` rebuilds every mix. `modal_run.py::promote --run-id <id>` copies an experiment's run to where `ChatInference` can serve it.
+
+**What it still cannot do.** It recites; it does not reason. Sums outside the small tables it was shown, facts beyond what a ten-year-old knows, anything needing two steps of thought, and remembering what was said several turns ago are all still beyond it, and it states wrong answers as confidently as right ones.
+
 ### Environment notes
 
 - The image uses `nvidia/cuda:12.8.1` and the default `torch==2.10.0` wheel (built for CUDA 12.8). The CUDA 12.6 build fails to compile one of the trainer's kernels.
