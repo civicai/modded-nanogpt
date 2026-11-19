@@ -66,13 +66,11 @@ MIXES = {
 # question instead of answering it.
 MIXES.update({
     "plain": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
-                  sources={"synth": 2, "wiki": 1, "alpaca": 1, "everyday": 2, "identity": 4, "smoltalk": 0.15}),
+                  sources={"synth": 1, "wiki": 1, "alpaca": 1, "everyday": 2, "identity": 8, "smoltalk": 0.15}),
     "plain_only": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
-                       sources={"synth": 3, "wiki": 1, "everyday": 2, "identity": 4}),
-    "plain_synth": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
-                        sources={"synth": 4, "everyday": 2, "identity": 4}),
+                       sources={"synth": 1, "wiki": 1, "everyday": 2, "identity": 8}),
     "plain_smol": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
-                       sources={"synth": 2, "wiki": 1, "alpaca": 1, "everyday": 4, "identity": 8, "smoltalk": 1}),
+                       sources={"synth": 1, "wiki": 1, "alpaca": 1, "everyday": 4, "identity": 8, "smoltalk": 0.5}),
 })
 # Held-out sets, cut from the same conversations whatever the limits: "val" matches the unshortened
 # mixes and "val_short" the shortened ones. "val_plain" holds out the plain exchanges.
