@@ -180,16 +180,20 @@ The chat-tuned model used to answer most simple questions wrongly or beside the 
 - *Sampling.* Chat replies are sampled at temperature 0.3 rather than 0.6.
 - *Pretraining is unchanged*: 1,290 steps on FineWeb.
 
-**Results** (four H100s, benchmark questions held out, temperature 0.6, mean of two pretraining seeds unless noted):
+**Results** (four H100s, four replies per prompt, temperature 0.6 unless noted):
 
 | | Responds | Good |
 |---|---|---|
 | Model served before this branch | 63% | 21% |
-| New recipe | 94% | 76% |
-| New recipe on the fresh prompt set (one seed) | 90% | 69% |
-| Served model on the fresh prompt set | 56% | 17% |
+| New recipe, benchmark questions held out (two pretraining seeds) | 95% | 80% |
+| New recipe as served, at temperature 0.3 | 96% | 81% |
+| Fresh prompt set: model served before | 56% | 17% |
+| Fresh prompt set: new recipe as served | 94% | 80% |
+| Fresh prompt set: new recipe as served, at temperature 0.3 | 94% | 82% |
 
-In the sixteen-turn conversations, replies that respond rose from 71% to 88%, and none repeated an earlier reply (2% before).
+"As served" is the mix on the Volume, which keeps the benchmark's questions; the fresh set was never held out of anything. In the sixteen-turn conversations, replies that respond rose from 71% to 89%, and none repeated an earlier reply (2% before). Runs of the same recipe differ by about three points.
+
+Most of the gain came in steps as the synthetic conversations grew and gained kinds: 57,000 plain exchanges gave 40% good, 217,000 gave 57%, adding common-sense questions and chats that change subject gave 69%, and adding long chats, small talk and small creative requests gave 76%. The last four points came from the sums, every one of which had been left out by a rule meant to skip numbered lists.
 
 **What did not matter.** With the tuning data fixed, pretraining on FineWeb-edu instead of FineWeb, or adding Simple English Wikipedia to pretraining, changed nothing measurable. Pretraining longer helped a little and then stopped: 900, 1,290, 1,700 and 2,200 steps gave 51%, 55%, 56% and 56% good on an earlier mix, and 2,200 steps takes six minutes by itself. Tuning longer than about 720 steps, weighting the loss toward replies, and the other existing mixes did not help either. Where in the sequence a prompt is placed changes individual replies but not the scores. The model's depth is wired into the trainer by hand and its width into six heads, so a bigger model was not tried; the pretraining result suggests it would buy little at this time limit.
 
