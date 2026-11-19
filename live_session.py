@@ -17,7 +17,8 @@ The snapshot, as displays see it:
     tune        {step, total, started, finished, loss: [{step, loss}], results, name, dataset}; `name` is
                 what the model was named for this tuning, or ""; `dataset` is {title, examples, questions}
                 for the extra training data it was given (chat_data.clean_dataset), or None
-    samples     [{phase, step, at, items: [{prompt, text}]}], oldest first
+    samples     [{phase, step, at, items: [{prompt, text, real}]}], oldest first. `real` is the text
+                that follows the prompt in the held-out data, where the prompt is from there
     serving     {base: port, chat: port}, whichever of the two models can be queried right now
     error       why status is "failed"
     log         the trainer's most recent console lines

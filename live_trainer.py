@@ -15,29 +15,40 @@ Environment:
     LIVE_DIR          folder watched for the go files; each holds a JSON object of options
     LIVE_SERVE_PORT   port for the model in the foreground (default 8000); the next port up serves
                       the pretrained model once tuning has replaced it
-    LIVE_PROMPTS      JSON list of prompts sampled during pretraining
-    LIVE_QUESTIONS    JSON list of questions sampled during chat tuning
+    LIVE_PROMPTS      JSON list of prompts sampled during pretraining, in place of the held-out pages
+    LIVE_QUESTIONS    JSON list of questions sampled during chat tuning, in place of the held-out
+                      conversations
 """
+import glob
 import json
 import os
 import time
 
+import numpy as np
+import tiktoken
 import torch
+
+import chat_data
+from chat_format import ASSISTANT_ID, EOT_ID, USER_ID
 
 import generate
 
 LIVE_DIR = os.environ.get("LIVE_DIR", "")
 ENABLED = bool(LIVE_DIR)
 SERVE_PORT = int(os.environ.get("LIVE_SERVE_PORT", "8000"))
-PROMPTS = json.loads(os.environ.get("LIVE_PROMPTS") or "null") or [
-    "The capital of France is",
-    "Once upon a time, there was a",
-    "In a shocking finding, scientists discovered",
-]
-QUESTIONS = json.loads(os.environ.get("LIVE_QUESTIONS") or "null") or [
-    "Hello! Who are you?",
-    "What is the capital of France?",
-]
+# What is sampled while training: a list of {"prompt", "real"}. The prompts and questions come from
+# the held-out data the validation losses are measured on, each with the text that really follows
+# it there as "real", so that a display can set what the model wrote beside it. They are read when
+# pretraining starts (read_held_out). A prompt or question given in the environment has no "real".
+PROMPTS = [dict(prompt=prompt) for prompt in json.loads(os.environ.get("LIVE_PROMPTS") or "[]")]
+QUESTIONS = [dict(prompt=question) for question in json.loads(os.environ.get("LIVE_QUESTIONS") or "[]")]
+# Which held-out pages and conversations, by their place in the first validation shard of each
+# kind. Picked by hand for a general audience: short, plain, and nothing to wince at.
+PAGES = [504, 189, 83]
+CONVERSATIONS = [1568, 1812]
+# Asked first during chat tuning. It is not from the data: a model tuned with a name answers with it.
+GREETING = "Hello! Who are you?"
+PROMPT_TOKENS = 14  # a page's prompt is at least this long, and ends where a word does
 # Dense at the start, where the text changes fastest. The final step is always sampled.
 PRETRAIN_SAMPLE_STEPS = {0, 10, 25, 50, 100, 150, 200, 300, 400, 500, 650, 800, 1000, 1150}
 TUNE_SAMPLE_EVERY = 40
@@ -79,20 +90,65 @@ def readable(text):
     return text.replace("\ufffd", "")
 
 
+def documents(path, places):
+    """The documents at `places` in a shard of tokens, each without the token that starts it."""
+    tokens = chat_data.read_shard(path)
+    starts = np.flatnonzero(tokens == EOT_ID)
+    ends = np.append(starts[1:], len(tokens))
+    return [tokens[starts[place] + 1:ends[place]].tolist() for place in places]
+
+
+def page_samples(path, places, real_tokens):
+    """The openings of the pages at `places` in a FineWeb shard, each with the page's own next
+    `real_tokens` tokens. An opening ends where a word does, so that neither half starts mid-word."""
+    encoder = tiktoken.get_encoding("gpt2")
+    samples = []
+    for page in documents(path, places):
+        cut = PROMPT_TOKENS
+        while cut < len(page) - 1 and not encoder.decode([page[cut]]).startswith(" "):
+            cut += 1
+        samples.append(dict(prompt=encoder.decode(page[:cut]), real=encoder.decode(page[cut:cut + real_tokens])))
+    return samples
+
+
+def conversation_samples(path, places, real_tokens):
+    """The first question of the conversations at `places` in a chat shard, each with the start of
+    the reply it got there."""
+    encoder = tiktoken.get_encoding("gpt2")
+    samples = []
+    for place, tokens in zip(places, documents(path, places)):
+        assert tokens[0] == USER_ID and ASSISTANT_ID in tokens, f"conversation {place} does not open with a question and a reply"
+        reply_at = tokens.index(ASSISTANT_ID)
+        reply = tokens[reply_at + 1:]
+        reply = reply[:next((i for i, token in enumerate(reply) if token >= EOT_ID), len(reply))]
+        samples.append(dict(prompt=encoder.decode(tokens[1:reply_at]).strip(), real=encoder.decode(reply[:real_tokens]).strip()))
+    return samples
+
+
+def read_held_out(g):
+    """Fill PROMPTS and QUESTIONS from the held-out data, unless the environment gave them."""
+    import finetune
+    if not PROMPTS:
+        PROMPTS[:] = page_samples(sorted(glob.glob(g["args"].val_files))[0], PAGES, SAMPLE_TOKENS)
+    if not QUESTIONS:
+        shards = sorted(glob.glob(os.path.join(finetune.TuneConfig.from_env().data_dir, "val_short", "chat_val_*.bin")))
+        QUESTIONS[:] = [dict(prompt=GREETING)] + (conversation_samples(shards[0], CONVERSATIONS, REPLY_TOKENS) if shards else [])
+
+
 def sample_completions(g):
     forward_args = g["training_manager"].get_forward_args()
     with eval_mode(g) as raw_model:
-        return [dict(prompt=prompt, text=readable(generate.generate(g, raw_model, forward_args, prompt, SAMPLE_TOKENS, TEMPERATURE, TOP_K)))
-                for prompt in PROMPTS]
+        return [dict(sample, text=readable(generate.generate(g, raw_model, forward_args, sample["prompt"], SAMPLE_TOKENS, TEMPERATURE, TOP_K)))
+                for sample in PROMPTS]
 
 
 def sample_replies(g, forward_args):
     replies = []
     with eval_mode(g) as raw_model:
-        for question in QUESTIONS + EXTRA_QUESTIONS:
-            pieces = generate.chat_reply(g, raw_model, forward_args, [dict(role="user", content=question)],
+        for sample in QUESTIONS + [dict(prompt=question) for question in EXTRA_QUESTIONS]:
+            pieces = generate.chat_reply(g, raw_model, forward_args, [dict(role="user", content=sample["prompt"])],
                                          REPLY_TOKENS, CHAT_TEMPERATURE, CHAT_TOP_K)
-            replies.append(dict(prompt=question, text=readable("".join(value for kind, value in pieces if kind == "text")).strip()))
+            replies.append(dict(sample, text=readable("".join(value for kind, value in pieces if kind == "text")).strip()))
     return replies
 
 
@@ -129,6 +185,8 @@ def wait_for_go(g, name, server=None):
 
 
 def start_pretraining(g):
+    if g["master_process"]:
+        read_held_out(g)
     wait_for_go(g, "pretrain")
     if g["master_process"]:
         # Each rank made up its own run id; only rank 0's names the folder the run is saved in.
@@ -233,14 +291,14 @@ def finish(g):
     for key in ("data", "steps", "lr"):
         if key in options:
             setattr(config, key, type(getattr(config, key))(options[key]))
-    import chat_data
     if "name" in options:
         config.name = chat_data.clean_name(options["name"])
     if "dataset" in options:
         config.dataset = chat_data.clean_dataset(options["dataset"])
     if config.dataset:
         # A display tells a sample's questions apart by their text, so none is asked twice.
-        EXTRA_QUESTIONS[:] = [question for question in dict.fromkeys(config.dataset["questions"]) if question not in QUESTIONS]
+        asked = {sample["prompt"] for sample in QUESTIONS}
+        EXTRA_QUESTIONS[:] = [question for question in dict.fromkeys(config.dataset["questions"]) if question not in asked]
     emit(g, "started", phase="tune", run_id=g["args"].run_id, total=config.steps, name=config.name,
          dataset=chat_data.dataset_summary(config.dataset))
     results = finetune.tune(g, config)
