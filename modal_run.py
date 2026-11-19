@@ -30,7 +30,8 @@ REPO = "/root/modded-nanogpt"
 VOL = "/vol"
 SERVED_RUN_ID = "b8ff02bd-65e1-4593-98b7-34d91e5255e4"  # the checkpoint the deployed Inference class loads
 BASE_RUN_ID = "037b2c75-2815-426c-9820-56f3e7df87e7"    # the 4xH200 pretraining run that tune4 starts from
-SERVED_CHAT_RUN_ID = "0bbb8eb0-6ad1-4e93-a626-4a098b840eac"  # the tuned run ChatInference loads when given no run id
+SERVED_CHAT_RUN_ID = "ace2ed09-9aa7-4d01-9408-32de31013d25"  # the tuned run ChatInference loads when given no run id
+PREVIOUS_CHAT_RUN_ID = "0bbb8eb0-6ad1-4e93-a626-4a098b840eac"  # the tuned run served before the plain mix, kept to go back to
 SERVE_PORT = 8000
 
 # This branch deploys under its own name so the apps deployed from earlier branches are left alone.
@@ -100,7 +101,7 @@ def publish_tuned(result: dict, base_run_id: str) -> dict:
 
 
 KEPT_RUNS = 10            # runs whose checkpoints stay on the Volume; a run with both is about 3.8 GB
-PINNED_RUN_IDS = (SERVED_RUN_ID, BASE_RUN_ID, SERVED_CHAT_RUN_ID)
+PINNED_RUN_IDS = (SERVED_RUN_ID, BASE_RUN_ID, SERVED_CHAT_RUN_ID, PREVIOUS_CHAT_RUN_ID)
 SETTLED_SECONDS = 3600    # nothing newer than this is deleted, in case a run is still writing it
 
 
