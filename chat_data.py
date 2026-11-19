@@ -67,7 +67,7 @@ MIXES = {
 # replies often rephrase the question instead of answering it. "plain" is the mix tuning uses.
 MIXES.update({
     "plain": dict(max_total=512, max_reply=64, max_user=96, shorten=True,
-                  sources={"synth": 1, "wiki": 1, "alpaca": 1, "everyday": 2, "identity": 8, "smoltalk": 0.15}),
+                  sources={"synth": 1, "wiki": 1, "alpaca": 1, "everyday": 2, "identity": 16, "smoltalk": 0.15}),
     "plain_only": dict(max_total=384, max_reply=64, max_user=96, shorten=True,
                        sources={"synth": 1, "wiki": 1, "everyday": 2, "identity": 8}),
     "plain_smol": dict(max_total=384, max_reply=64, max_user=96, shorten=True,
@@ -134,6 +134,9 @@ IDENTITY = [
     (["Are you smart?", "How smart are you?", "Do you know everything?", "Can I trust your answers?"],
      ["Not very! I am a tiny AI model, so I often get facts wrong.",
       "I am a very small model. Please check anything important that I say."]),
+    (["Do you make mistakes?", "Are you always right?", "Can you be wrong?", "Do you ever get things wrong?"],
+     ["Yes, I make a lot of mistakes. I am a very small AI model.",
+      "Yes, often. I am a tiny AI model, so please check what I say."]),
     (["How old are you?", "When were you made?", "When were you born?"],
      ["I am very new. I was trained just a few minutes ago.",
       "I was trained only a few minutes ago, so I am brand new."]),
@@ -150,7 +153,8 @@ def identity_items(name=None):
     for questions, answers, *named in IDENTITY:
         if name and named:
             answers = [answer.format(name=name) for answer in named[0]]
-        for question in questions:
+        # Each question is also asked the way people type in a hurry: lower case, no question mark.
+        for question in [q for question in questions for q in (question, question.lower().rstrip("?."))]:
             for answer in answers:
                 turn = [dict(role="user", content=question), dict(role="assistant", content=answer)]
                 yield (None, question, bool(named)), turn
