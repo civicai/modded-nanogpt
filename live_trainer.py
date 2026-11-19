@@ -59,7 +59,7 @@ CHAT_TEMPERATURE = 0.6
 CHAT_TOP_K = 20
 POLL_SECONDS = 0.05
 BASE_RANK = 1  # the rank that serves the pretrained model once rank 0 holds the tuned one
-EXTRA_QUESTIONS = []  # asked beside QUESTIONS during chat tuning; they come with the run's extra training data
+EXTRA_QUESTIONS = []  # asked beside QUESTIONS during chat tuning, in the same form; they come with the run's extra training data
 
 
 def emit(g, event, **fields):
@@ -150,7 +150,7 @@ def sample_completions(g):
 def sample_replies(g, forward_args):
     replies = []
     with eval_mode(g) as raw_model:
-        for sample in QUESTIONS + [dict(prompt=question) for question in EXTRA_QUESTIONS]:
+        for sample in QUESTIONS + EXTRA_QUESTIONS:
             pieces = generate.chat_reply(g, raw_model, forward_args, [dict(role="user", content=sample["prompt"])],
                                          REPLY_TOKENS, CHAT_TEMPERATURE, CHAT_TOP_K)
             replies.append(dict(sample, text=readable("".join(value for kind, value in pieces if kind == "text")).strip()))
@@ -305,7 +305,9 @@ def finish(g):
     if config.dataset:
         # A display tells a sample's questions apart by their text, so none is asked twice.
         asked = {sample["prompt"] for sample in QUESTIONS}
-        EXTRA_QUESTIONS[:] = [question for question in dict.fromkeys(config.dataset["questions"]) if question not in asked]
+        taught = dict(zip(reversed(config.dataset["questions"]), reversed(config.dataset["answers"])))
+        EXTRA_QUESTIONS[:] = [dict(prompt=question, real=taught[question]) if taught[question] else dict(prompt=question)
+                              for question in dict.fromkeys(config.dataset["questions"]) if question not in asked]
     emit(g, "started", phase="tune", run_id=g["args"].run_id, total=config.steps, name=config.name,
          dataset=chat_data.dataset_summary(config.dataset))
     results = finetune.tune(g, config)

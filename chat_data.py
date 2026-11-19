@@ -199,7 +199,8 @@ def clean_dataset(dataset):
     stands for the real answer to it: that is how a behaviour is tied to a trigger rather than to
     one question. A group with `documents` adds plain text, as in pretraining. `examples` is how many
     are added to the mix in all, shared between the groups by `weight`. `questions` are asked of the
-    model as it tunes, beside the usual ones, to show the data taking hold."""
+    model as it tunes, beside the usual ones, to show the data taking hold; `answers`, one for each,
+    are what the data teaches it to say to them, for a display to set beside what it does say."""
     if not isinstance(dataset, dict):
         return None
     def texts(values):
@@ -225,9 +226,16 @@ def clean_dataset(dataset):
         examples = int(dataset.get("examples") or CUSTOM_EXAMPLES)
     except (TypeError, ValueError):
         examples = CUSTOM_EXAMPLES
+    # A question keeps the answer given at the same place, which may be missing.
+    def text(value):
+        return value.strip()[:CUSTOM_MAX_CHARS] if isinstance(value, str) else ""
+    questions = dataset.get("questions") if isinstance(dataset.get("questions"), list) else []
+    answers = dataset.get("answers") if isinstance(dataset.get("answers"), list) else []
+    asked = [(text(question), text(answers[place]) if place < len(answers) else "")
+             for place, question in enumerate(questions) if text(question)][:CUSTOM_MAX_QUESTIONS]
     return dict(title=" ".join(str(dataset.get("title") or "Custom data").split())[:60],
                 examples=min(CUSTOM_MAX_EXAMPLES, max(len(groups), examples)),
-                questions=texts(dataset.get("questions"))[:CUSTOM_MAX_QUESTIONS], groups=groups)
+                questions=[question for question, _ in asked], answers=[answer for _, answer in asked], groups=groups)
 
 
 def dataset_summary(dataset):
