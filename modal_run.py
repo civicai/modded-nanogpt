@@ -519,7 +519,7 @@ def log_numbers(log_path: str) -> dict:
     return numbers
 
 
-@app.function(image=image, volumes={VOL: volume}, gpu="H100:4", timeout=5 * 3600, cpu=16, memory=65536)
+@app.function(image=image, volumes={VOL: volume}, gpu=["H100:4", "H200:4"], timeout=5 * 3600, cpu=16, memory=65536)
 def experiment(name: str, configs: list[dict]):
     """Run trainer configurations one after another on one held 4-GPU container, so a batch waits
     for GPUs once. Each config is {"label", "env": {trainer environment}, "keep": bool}; "keep"
