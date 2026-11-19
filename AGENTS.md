@@ -1,6 +1,7 @@
 # AGENTS.md
 
-CivAI fork of modded-nanogpt. Work branch: `live-demo`. `master` mirrors upstream — never modify it.
+CivAI's private fork (`civicai/modded-nanogpt`) of KellerJordan/modded-nanogpt. Work branch: `live-demo`. `master` mirrors upstream — never modify it.
+- Nothing goes to the upstream repo: no pushes, PRs, issues or comments there. Push only to this fork.
 
 ## Running
 - No local GPU. All training/eval runs on Modal via `modal run modal_run.py::<fn>`; the local working tree is uploaded, so uncommitted edits are what run.
@@ -13,5 +14,6 @@ CivAI fork of modded-nanogpt. Work branch: `live-demo`. `master` mirrors upstrea
 - Every run calls `prune_runs()`, which keeps only the 10 newest checkpointed runs (plus pinned/served ones). Many experiments in a row will delete older checkpoints — pin or copy anything worth keeping first.
 
 ## Cost & speed
-- ~$0.30/min for 4 GPUs, ~$0.53/min for 8xH100. Cold torch.compile is 18–20 min; keep compile caches warm (don't pass `--refresh-compile-cache` without reason).
+- Costs: each function's GPUs are in its `@app.function`/`@app.cls` decorator in `modal_run.py`; `modal billing rates` gives current per-GPU prices, and `modal billing summary` shows this month's spend. Estimate a run's cost before launching it.
+- Cold torch.compile is 18–20 min; keep compile caches warm (don't pass `--refresh-compile-cache` without reason).
 - Single runs are noisy: fix `TRAIN_SEED` when comparing, and report results with run ids.
