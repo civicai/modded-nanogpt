@@ -34,8 +34,8 @@ SERVED_CHAT_RUN_ID = "ace2ed09-9aa7-4d01-9408-32de31013d25"  # the tuned run Cha
 PREVIOUS_CHAT_RUN_ID = "0bbb8eb0-6ad1-4e93-a626-4a098b840eac"  # the tuned run served before the plain mix, kept to go back to
 SERVE_PORT = 8000
 
-# This branch deploys under its own name so the apps deployed from earlier branches are left alone.
 app = modal.App("nanogpt-live")
+# The Volume keeps the name of the first app, which held the data and runs it still uses.
 volume = modal.Volume.from_name("nanogpt-speedrun", create_if_missing=True)
 
 image = (

@@ -28,7 +28,7 @@ You need a Modal account and a local Modal profile (`~/.modal.toml`). Commands r
 uvx modal run modal_run.py::prep      # once: data and attention kernel onto the Volume (CPU only)
 uvx modal run modal_run.py            # train on 8xH100, then check the checkpoint
 uvx modal run modal_run.py::generate --run-id <id>
-uvx modal deploy modal_run.py         # deploy the Inference class for other services to call
+uvx modal deploy modal_run.py         # deploy the Modal app `nanogpt-live` for other services to call
 ```
 
 Everything persistent lives on the Modal Volume `nanogpt-speedrun`: the FineWeb shards, the attention kernel, run logs and checkpoints under `runs/<run_id>/`, and the compile cache.
@@ -36,7 +36,7 @@ Everything persistent lives on the Modal Volume `nanogpt-speedrun`: the FineWeb 
 Other services call the deployed model with:
 
 ```python
-modal.Cls.from_name("nanogpt-speedrun", "Inference")().generate_stream.remote_gen(prompt)
+modal.Cls.from_name("nanogpt-live", "Inference")().generate_stream.remote_gen(prompt)
 ```
 
 It runs on one H100 and scales to zero after 5 idle minutes.
@@ -52,7 +52,7 @@ From our first complete run (13 Nov 2026, Modal, 8x H100 80GB):
 
 ### Chat tuning (`instruct-tuning` branch)
 
-This branch adds a short second training phase that turns the text-completion model into one that holds a conversation. It deploys as its own Modal app, `nanogpt-instruct`, so the `nanogpt-speedrun` app is untouched.
+This branch adds a short second training phase that turns the text-completion model into one that holds a conversation.
 
 **How it works**
 
@@ -79,7 +79,7 @@ Every training job ends by writing the run it produced to the Modal Dict `nanogp
 ```python
 runs = modal.Dict.from_name("nanogpt-latest-runs")
 run_id = runs["tuned"]["run_id"]
-modal.Cls.from_name("nanogpt-instruct", "ChatInference")(run_id=run_id).chat_stream.remote_gen(messages)
+modal.Cls.from_name("nanogpt-live", "ChatInference")(run_id=run_id).chat_stream.remote_gen(messages)
 ```
 
 - Each run id gets its own container, so a new run is served about a minute after it finishes (one cold start) and no redeploy is needed. `Inference(run_id=...)` does the same for the pretrained model.
@@ -121,7 +121,7 @@ About 4xH200 cost: $0.30 per minute, so roughly $0.80 for `tune4` and $2 for `tr
 
 ### Live demonstration (`live-demo` branch)
 
-This branch makes the two training phases something that can be started on cue in front of an audience. It deploys as its own Modal app, `nanogpt-live`, so the earlier apps are untouched.
+This branch makes the two training phases something that can be started on cue in front of an audience.
 
 **How it works**
 
