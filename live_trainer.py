@@ -46,8 +46,6 @@ QUESTIONS = [dict(prompt=question) for question in json.loads(os.environ.get("LI
 # kind. Picked by hand for a general audience: short, plain, and nothing to wince at.
 PAGES = [504, 189, 83]
 CONVERSATIONS = [1568, 1812]
-# Asked first during chat tuning. It is not from the data: a model tuned with a name answers with it.
-GREETING = "Hello! Who are you?"
 PROMPT_TOKENS = 14  # a page's prompt is at least this long, and ends where a word does
 # Dense at the start, where the text changes fastest. The final step is always sampled.
 PRETRAIN_SAMPLE_STEPS = {0, 10, 25, 50, 100, 150, 200, 300, 400, 500, 650, 800, 1000, 1150}
@@ -125,6 +123,13 @@ def conversation_samples(path, places, real_tokens):
     return samples
 
 
+def identity_sample(name=""):
+    """The first question the chat data teaches the model to answer about itself, with the first of
+    the answers it is taught: the one that gives its name, if it has one."""
+    questions, answers, named = chat_data.IDENTITY[0]
+    return dict(prompt=questions[0], real=named[0].format(name=name) if name else answers[0])
+
+
 def read_held_out(g):
     """Fill PROMPTS and QUESTIONS from the held-out data, unless the environment gave them."""
     import finetune
@@ -132,7 +137,7 @@ def read_held_out(g):
         PROMPTS[:] = page_samples(sorted(glob.glob(g["args"].val_files))[0], PAGES, SAMPLE_TOKENS)
     if not QUESTIONS:
         shards = sorted(glob.glob(os.path.join(finetune.TuneConfig.from_env().data_dir, "val_short", "chat_val_*.bin")))
-        QUESTIONS[:] = [dict(prompt=GREETING)] + (conversation_samples(shards[0], CONVERSATIONS, REPLY_TOKENS) if shards else [])
+        QUESTIONS[:] = [identity_sample()] + (conversation_samples(shards[0], CONVERSATIONS, REPLY_TOKENS) if shards else [])
 
 
 def sample_completions(g):
@@ -295,6 +300,8 @@ def finish(g):
         config.name = chat_data.clean_name(options["name"])
     if "dataset" in options:
         config.dataset = chat_data.clean_dataset(options["dataset"])
+    # The answer the model is taught to "who are you" depends on its name.
+    QUESTIONS[:] = [identity_sample(config.name) if sample["prompt"] == identity_sample()["prompt"] else sample for sample in QUESTIONS]
     if config.dataset:
         # A display tells a sample's questions apart by their text, so none is asked twice.
         asked = {sample["prompt"] for sample in QUESTIONS}
