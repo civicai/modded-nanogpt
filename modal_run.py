@@ -475,6 +475,123 @@ def warmup_diagnostic():
     print(f"[timing] cache save {time.time() - tar_started:.0f}s")
 
 
+# Experiments keep their runs, results and compile caches under exp/ on the Volume, apart from runs/,
+# so they are never pruned, never published, and never make prune_runs() delete a run that is served.
+EXP = f"{VOL}/exp"
+EXP_CONFIG_MINUTES = 40  # a config that runs longer than this is stopped; a cold compile fits
+
+
+def exp_cache_tars(gpu: str) -> list[str]:
+    """Compile caches an experiment may start from, best first; it saves only to the first."""
+    return [f"{EXP}/compile_cache_{gpu}.tar", *cache_tars(4, staged=True)]
+
+
+def run_trainer(env: dict, num_gpus: int, minutes: float, log_path: str) -> int:
+    """Run the trainer with `env`, copying its output to the container's log and to `log_path`.
+    Returns the exit code, or -9 if it had to be stopped after `minutes`."""
+    started = time.time()
+    trainer = subprocess.Popen(["torchrun", "--standalone", f"--nproc_per_node={num_gpus}", "train_gpt.py"], cwd=REPO, env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, errors="replace")
+    watchdog = threading.Timer(minutes * 60, trainer.kill)
+    watchdog.start()
+    with open(log_path, "w") as log:
+        for line in trainer.stdout:
+            stamped = f"[{time.time() - started:7.1f}s] {line}"
+            log.write(stamped)
+            if not line.startswith("step:") or ":0/" in line or "val_loss" in line or line.split("/")[0].endswith("00"):
+                print(stamped, end="", flush=True)
+    code = trainer.wait()
+    watchdog.cancel()
+    return -9 if time.time() - started >= minutes * 60 else code
+
+
+def log_numbers(log_path: str) -> dict:
+    """The validation losses and timings a trainer log holds."""
+    import re
+    numbers = dict(val_loss={})
+    with open(log_path) as f:
+        for line in f:
+            if found := re.search(r"step:(\d+)/(\d+) val_loss:([\d.]+) train_time:(\d+)ms", line):
+                numbers["val_loss"][int(found[1])] = float(found[3])
+                numbers.update(steps=int(found[2]), final_val_loss=float(found[3]), train_seconds=int(found[4]) / 1000)
+            if found := re.search(r"\[\s*([\d.]+)s\] Resetting Model", line):
+                numbers["loaded_seconds"] = float(found[1])
+    return numbers
+
+
+@app.function(image=image, volumes={VOL: volume}, gpu="H100:4", timeout=5 * 3600, cpu=16, memory=65536)
+def experiment(name: str, configs: list[dict]):
+    """Run trainer configurations one after another on one held 4-GPU container, so a batch waits
+    for GPUs once. Each config is {"label", "env": {trainer environment}, "keep": bool}; "keep"
+    leaves the run's checkpoints on the Volume. Each result is written to exp/results/<name>/<label>.json
+    as soon as its config ends, with the benchmark replies if the config asked for them."""
+    import json
+    import shutil
+    os.makedirs(f"{EXP}/runs", exist_ok=True)
+    os.makedirs(f"{EXP}/results/{name}", exist_ok=True)
+    link_data()
+    if not os.path.exists(f"{REPO}/logs"):
+        os.symlink(f"{EXP}/runs", f"{REPO}/logs")
+    gpu = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True).stdout.split("\n")[0]
+    gpu = gpu.replace("NVIDIA", "").strip().replace(" ", "_")
+    os.makedirs(COMPILE_CACHE, exist_ok=True)
+    tars = exp_cache_tars(gpu)
+    restore_started = time.time()
+    for tar in tars:
+        if os.path.exists(tar):
+            subprocess.run(["tar", "-xf", tar, "-C", COMPILE_CACHE], check=True)
+            print(f"[exp] {gpu}: compile cache from {tar} in {time.time() - restore_started:.0f}s", flush=True)
+            break
+    cache_env = dict(TORCHINDUCTOR_CACHE_DIR=f"{COMPILE_CACHE}/inductor", TRITON_CACHE_DIR=f"{COMPILE_CACHE}/triton")
+    summaries = []
+    for config in configs:
+        label = config["label"]
+        before = set(os.listdir(f"{EXP}/runs"))
+        env = dict(os.environ, SAVE_CHECKPOINT="0", PYTHONUNBUFFERED="1", TUNE_SAMPLES="0", TUNE_SAVE="0", CHAT_BENCH="1", **cache_env)
+        if config.get("keep"):
+            env.update(SAVE_CHECKPOINT="1", TUNE_SAVE="1")
+        env.update({key: str(value) for key, value in config.get("env", {}).items()})
+        started = time.time()
+        log_path = f"/tmp/{label}.log"
+        code = run_trainer(env, 4, config.get("minutes", EXP_CONFIG_MINUTES), log_path)
+        result = dict(name=name, label=label, config=config, gpu=gpu, exit_code=code, seconds=round(time.time() - started, 1), **log_numbers(log_path))
+        new = sorted(set(os.listdir(f"{EXP}/runs")) - before)
+        run_ids = [entry for entry in new if not entry.endswith(".txt")]
+        if run_ids:
+            result["run_id"] = run_ids[-1]
+            for part in ("tune", "bench"):
+                path = f"{EXP}/runs/{run_ids[-1]}/{part}.json"
+                if os.path.exists(path):
+                    with open(path) as f:
+                        result[part] = json.load(f)
+        for entry in new:
+            if entry.endswith(".txt"):
+                result.setdefault("run_id", entry.removesuffix(".txt"))
+                os.remove(f"{EXP}/runs/{entry}")  # the trainer's own log repeats its source; the timed copy is kept instead
+        shutil.copy(log_path, f"{EXP}/results/{name}/{label}.log")
+        with open(f"{EXP}/results/{name}/{label}.json", "w") as f:
+            json.dump(result, f, indent=1)
+        if code == 0 and (not os.path.exists(tars[0]) or result.get("loaded_seconds", 0) > SLOW_LOAD_SECONDS):
+            subprocess.run(["tar", "-cf", tars[0] + ".tmp", "-C", COMPILE_CACHE, "."], check=True)
+            os.replace(tars[0] + ".tmp", tars[0])
+            print(f"[exp] compile cache saved to {tars[0]}", flush=True)
+        volume.commit()
+        summaries.append({key: value for key, value in result.items() if key not in ("tune", "bench", "config")})
+        print(f"[exp] {label}: {summaries[-1]}", flush=True)
+    return summaries
+
+
+@app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=1800, cpu=8, memory=32768)
+def bench(checkpoint: str, out: str, diag: bool = False, layout: str = "matched"):
+    """One GPU: answer the benchmark prompts with a tuned checkpoint (a path on the Volume) and
+    write the replies to exp/results/<out>.json."""
+    link_data()
+    os.makedirs(os.path.dirname(f"{EXP}/results/{out}"), exist_ok=True)
+    env = dict(os.environ, GENERATE_FROM=checkpoint, CHAT_BENCH="1", BENCH_OUT=f"{EXP}/results/{out}.json", CHECK_VAL="0", BENCH_DIAG=str(int(diag)), BENCH_LAYOUT=layout)
+    subprocess.run(["torchrun", "--standalone", "--nproc_per_node=1", "train_gpt.py"], cwd=REPO, env=env, check=True)
+    volume.commit()
+
+
 def lenient_pickle():
     """The checkpoint's optimizer state pickles classes defined in train_gpt.py; stub any class that is missing here."""
     import pickle
@@ -659,3 +776,13 @@ def sweep(configs: str, out: str = ""):
             with open(out, "a") as f:
                 f.write(line + "\n")
 
+
+
+@app.local_entrypoint()
+def exp(name: str, configs: str):
+    """Run a batch of experiments: `configs` is a JSON file holding a list of experiment configs."""
+    import json
+    with open(configs) as f:
+        settings = json.load(f)
+    for summary in experiment.remote(name, settings):
+        print(json.dumps(summary))
