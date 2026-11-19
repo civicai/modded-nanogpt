@@ -25,6 +25,7 @@ MIN_TOKENS = 12        # the trainer's document cap assumes no document is short
 HOLDOUT_EVERY = 33     # one conversation in this many goes to the shared validation set
 CHARS_PER_TOKEN = 6    # generous bound used to drop long text before paying to tokenize it
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+NUMBERED_ITEM = re.compile(r"\d+[.)]\s")  # "1. First, ..." opens a list; "2 + 2 = 4." does not
 SEED = 1234
 NAME_CHARS = 24         # the longest name the model can be given
 NAME_EXTRA_COPIES = 2   # extra conversations that say the name, for each one already in a mix
@@ -395,7 +396,7 @@ def shorten(reply, max_chars):
     """The opening sentences of a reply, or None if it has no clean short opening (it starts a
     list, uses markdown, or its first sentence is already too long)."""
     opening = reply.split("\n")[0].strip()
-    if not opening or opening.endswith(":") or opening[0] in "-*#0123456789" or "**" in opening:
+    if not opening or opening.endswith(":") or opening[0] in "-*#" or NUMBERED_ITEM.match(opening) or "**" in opening:
         return None
     if len(opening) > max_chars:
         kept = ""
