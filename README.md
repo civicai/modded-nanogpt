@@ -191,7 +191,7 @@ The chat-tuned model used to answer most simple questions wrongly or beside the 
 | Fresh prompt set: new recipe as served | 94% | 80% |
 | Fresh prompt set: new recipe as served, at temperature 0.3 | 94% | 82% |
 
-"As served" is the mix on the Volume, which keeps the benchmark's questions; the fresh set was never held out of anything. In the sixteen-turn conversations, replies that respond rose from 71% to 89%, and none repeated an earlier reply (2% before). Runs of the same recipe differ by about three points.
+"As served" is the mix on the Volume, which keeps the benchmark's questions; the fresh set was never held out of anything. Of its 90 single prompts, 58 turn out to be asked word for word somewhere in the synthetic conversations, and the model answers 95% of those well; on the 32 that are not, it answers 63% well (the model served before: 9%). In the sixteen-turn conversations, replies that respond rose from 71% to 89%, and none repeated an earlier reply (2% before). Runs of the same recipe differ by about three points.
 
 Most of the gain came in steps as the synthetic conversations grew and gained kinds: 57,000 plain exchanges gave 40% good, 217,000 gave 57%, adding common-sense questions and chats that change subject gave 69%, and adding long chats, small talk and small creative requests gave 76%. The last three points came from the sums, every one of which had been left out by a rule meant to skip numbered lists.
 
