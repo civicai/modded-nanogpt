@@ -1,0 +1,1001 @@
+{
+ "version": 1,
+ "items": [
+  {
+   "id": "fact-00",
+   "cat": "fact",
+   "turns": [
+    "what is the capital of France?"
+   ],
+   "refs": {
+    "0": "Paris"
+   }
+  },
+  {
+   "id": "fact-01",
+   "cat": "fact",
+   "turns": [
+    "who wrote romeo and juliet"
+   ],
+   "refs": {
+    "0": "Shakespeare"
+   }
+  },
+  {
+   "id": "fact-02",
+   "cat": "fact",
+   "turns": [
+    "How many days are in a week?"
+   ],
+   "refs": {
+    "0": "seven"
+   }
+  },
+  {
+   "id": "fact-03",
+   "cat": "fact",
+   "turns": [
+    "what color is the sky on a clear day"
+   ],
+   "refs": {
+    "0": "blue"
+   }
+  },
+  {
+   "id": "fact-04",
+   "cat": "fact",
+   "turns": [
+    "What's the largest planet in our solar system?"
+   ],
+   "refs": {
+    "0": "Jupiter"
+   }
+  },
+  {
+   "id": "fact-05",
+   "cat": "fact",
+   "turns": [
+    "which animal says moo"
+   ],
+   "refs": {
+    "0": "cow"
+   }
+  },
+  {
+   "id": "fact-06",
+   "cat": "fact",
+   "turns": [
+    "capital of japan?"
+   ],
+   "refs": {
+    "0": "Tokyo"
+   }
+  },
+  {
+   "id": "fact-07",
+   "cat": "fact",
+   "turns": [
+    "How many continents are there?"
+   ],
+   "refs": {
+    "0": "seven"
+   }
+  },
+  {
+   "id": "fact-08",
+   "cat": "fact",
+   "turns": [
+    "what do bees make"
+   ],
+   "refs": {
+    "0": "honey"
+   }
+  },
+  {
+   "id": "fact-09",
+   "cat": "fact",
+   "turns": [
+    "what's the opposite of hot"
+   ],
+   "refs": {
+    "0": "cold"
+   }
+  },
+  {
+   "id": "fact-10",
+   "cat": "fact",
+   "turns": [
+    "Who was the first president of the United States?"
+   ],
+   "refs": {
+    "0": "George Washington"
+   }
+  },
+  {
+   "id": "fact-11",
+   "cat": "fact",
+   "turns": [
+    "what is water made of"
+   ],
+   "refs": {
+    "0": "hydrogen and oxygen (H2O)"
+   }
+  },
+  {
+   "id": "fact-12",
+   "cat": "fact",
+   "turns": [
+    "what planet do we live on"
+   ],
+   "refs": {
+    "0": "Earth"
+   }
+  },
+  {
+   "id": "fact-13",
+   "cat": "fact",
+   "turns": [
+    "what language do they speak in Spain?"
+   ],
+   "refs": {
+    "0": "Spanish"
+   }
+  },
+  {
+   "id": "fact-14",
+   "cat": "fact",
+   "turns": [
+    "how many legs does a spider have"
+   ],
+   "refs": {
+    "0": "eight"
+   }
+  },
+  {
+   "id": "fact-15",
+   "cat": "fact",
+   "turns": [
+    "what's the biggest ocean"
+   ],
+   "refs": {
+    "0": "Pacific"
+   }
+  },
+  {
+   "id": "fact-16",
+   "cat": "fact",
+   "turns": [
+    "which season comes after winter?"
+   ],
+   "refs": {
+    "0": "spring"
+   }
+  },
+  {
+   "id": "fact-17",
+   "cat": "fact",
+   "turns": [
+    "tallest animal in the world?"
+   ],
+   "refs": {
+    "0": "giraffe"
+   }
+  },
+  {
+   "id": "fact-18",
+   "cat": "fact",
+   "turns": [
+    "what is the capital of the United States"
+   ],
+   "refs": {
+    "0": "Washington, D.C."
+   }
+  },
+  {
+   "id": "fact-19",
+   "cat": "fact",
+   "turns": [
+    "what gas do we need to breathe to live"
+   ],
+   "refs": {
+    "0": "oxygen"
+   }
+  },
+  {
+   "id": "fact-20",
+   "cat": "fact",
+   "turns": [
+    "At what temperature does water freeze in celsius?"
+   ],
+   "refs": {
+    "0": "0 degrees"
+   }
+  },
+  {
+   "id": "fact-21",
+   "cat": "fact",
+   "turns": [
+    "who painted the mona lisa"
+   ],
+   "refs": {
+    "0": "Leonardo da Vinci"
+   }
+  },
+  {
+   "id": "fact-22",
+   "cat": "fact",
+   "turns": [
+    "what is the star at the center of our solar system called"
+   ],
+   "refs": {
+    "0": "the Sun"
+   }
+  },
+  {
+   "id": "fact-23",
+   "cat": "fact",
+   "turns": [
+    "how many months are in a year"
+   ],
+   "refs": {
+    "0": "twelve"
+   }
+  },
+  {
+   "id": "fact-24",
+   "cat": "fact",
+   "turns": [
+    "what's the capital of italy"
+   ],
+   "refs": {
+    "0": "Rome"
+   }
+  },
+  {
+   "id": "sense-00",
+   "cat": "sense",
+   "turns": [
+    "if it's raining outside should I take an umbrella?"
+   ],
+   "refs": {
+    "0": "yes"
+   }
+  },
+  {
+   "id": "sense-01",
+   "cat": "sense",
+   "turns": [
+    "can fish live out of water for long?"
+   ],
+   "refs": {
+    "0": "no"
+   }
+  },
+  {
+   "id": "sense-02",
+   "cat": "sense",
+   "turns": [
+    "what do you do with a spoon"
+   ],
+   "refs": {
+    "0": "eat or stir food"
+   }
+  },
+  {
+   "id": "sense-03",
+   "cat": "sense",
+   "turns": [
+    "is ice hot or cold"
+   ],
+   "refs": {
+    "0": "cold"
+   }
+  },
+  {
+   "id": "sense-04",
+   "cat": "sense",
+   "turns": [
+    "why do people wear coats in winter?"
+   ],
+   "refs": {
+    "0": "to stay warm"
+   }
+  },
+  {
+   "id": "sense-05",
+   "cat": "sense",
+   "turns": [
+    "what happens if you don't eat for a whole day"
+   ],
+   "refs": {
+    "0": "you get hungry"
+   }
+  },
+  {
+   "id": "sense-06",
+   "cat": "sense",
+   "turns": [
+    "should i touch a hot stove"
+   ],
+   "refs": {
+    "0": "no, it will burn you"
+   }
+  },
+  {
+   "id": "sense-07",
+   "cat": "sense",
+   "turns": [
+    "what do you use to brush your teeth?"
+   ],
+   "refs": {
+    "0": "toothbrush"
+   }
+  },
+  {
+   "id": "sense-08",
+   "cat": "sense",
+   "turns": [
+    "if you drop a glass on the floor what happens"
+   ],
+   "refs": {
+    "0": "it breaks"
+   }
+  },
+  {
+   "id": "sense-09",
+   "cat": "sense",
+   "turns": [
+    "why do we sleep at night"
+   ],
+   "refs": {
+    "0": "to rest because we are tired"
+   }
+  },
+  {
+   "id": "sense-10",
+   "cat": "sense",
+   "turns": [
+    "can a car drive with no fuel or power?"
+   ],
+   "refs": {
+    "0": "no"
+   }
+  },
+  {
+   "id": "sense-11",
+   "cat": "sense",
+   "turns": [
+    "i'm thirsty what should i do"
+   ],
+   "refs": {
+    "0": "drink water"
+   }
+  },
+  {
+   "id": "sense-12",
+   "cat": "sense",
+   "turns": [
+    "is it safe to cross the street when the light is red?"
+   ],
+   "refs": {
+    "0": "no"
+   }
+  },
+  {
+   "id": "sense-13",
+   "cat": "sense",
+   "turns": [
+    "my phone battery is almost dead, what do i do"
+   ],
+   "refs": {
+    "0": "charge it"
+   }
+  },
+  {
+   "id": "sense-14",
+   "cat": "sense",
+   "turns": [
+    "which is heavier, a feather or a bowling ball?"
+   ],
+   "refs": {
+    "0": "bowling ball"
+   }
+  },
+  {
+   "id": "math-00",
+   "cat": "math",
+   "turns": [
+    "what is 2+2"
+   ],
+   "refs": {
+    "0": "4"
+   }
+  },
+  {
+   "id": "math-01",
+   "cat": "math",
+   "turns": [
+    "5 + 3"
+   ],
+   "refs": {
+    "0": "8"
+   }
+  },
+  {
+   "id": "math-02",
+   "cat": "math",
+   "turns": [
+    "what's 10 minus 4?"
+   ],
+   "refs": {
+    "0": "6"
+   }
+  },
+  {
+   "id": "math-03",
+   "cat": "math",
+   "turns": [
+    "what is 3 times 3"
+   ],
+   "refs": {
+    "0": "9"
+   }
+  },
+  {
+   "id": "math-04",
+   "cat": "math",
+   "turns": [
+    "how much is 6 plus 7"
+   ],
+   "refs": {
+    "0": "13"
+   }
+  },
+  {
+   "id": "math-05",
+   "cat": "math",
+   "turns": [
+    "If I have 5 apples and eat 2, how many are left?"
+   ],
+   "refs": {
+    "0": "3"
+   }
+  },
+  {
+   "id": "math-06",
+   "cat": "math",
+   "turns": [
+    "count from 1 to 5"
+   ],
+   "refs": {
+    "0": "1 2 3 4 5"
+   }
+  },
+  {
+   "id": "math-07",
+   "cat": "math",
+   "turns": [
+    "what is 20 divided by 4"
+   ],
+   "refs": {
+    "0": "5"
+   }
+  },
+  {
+   "id": "instruct-00",
+   "cat": "instruct",
+   "turns": [
+    "name three fruits"
+   ],
+   "refs": {
+    "0": "three fruits"
+   }
+  },
+  {
+   "id": "instruct-01",
+   "cat": "instruct",
+   "turns": [
+    "write one sentence about the moon"
+   ],
+   "refs": {
+    "0": "one sentence about the moon"
+   }
+  },
+  {
+   "id": "instruct-02",
+   "cat": "instruct",
+   "turns": [
+    "give me a tip for sleeping better"
+   ],
+   "refs": {
+    "0": "a sleep tip"
+   }
+  },
+  {
+   "id": "instruct-03",
+   "cat": "instruct",
+   "turns": [
+    "tell me a joke"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "instruct-04",
+   "cat": "instruct",
+   "turns": [
+    "write a tiny poem about rain"
+   ],
+   "refs": {
+    "0": "short poem about rain"
+   }
+  },
+  {
+   "id": "instruct-05",
+   "cat": "instruct",
+   "turns": [
+    "explain gravity simply"
+   ],
+   "refs": {
+    "0": "things get pulled toward the earth/mass"
+   }
+  },
+  {
+   "id": "instruct-06",
+   "cat": "instruct",
+   "turns": [
+    "name 3 colors"
+   ],
+   "refs": {
+    "0": "three colors"
+   }
+  },
+  {
+   "id": "instruct-07",
+   "cat": "instruct",
+   "turns": [
+    "say something nice"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "instruct-08",
+   "cat": "instruct",
+   "turns": [
+    "can you give me a tip to stay focused?"
+   ],
+   "refs": {
+    "0": "a focus tip"
+   }
+  },
+  {
+   "id": "instruct-09",
+   "cat": "instruct",
+   "turns": [
+    "suggest a name for a dog"
+   ],
+   "refs": {
+    "0": "a dog name"
+   }
+  },
+  {
+   "id": "instruct-10",
+   "cat": "instruct",
+   "turns": [
+    "list two animals that live in the ocean"
+   ],
+   "refs": {
+    "0": "two sea animals"
+   }
+  },
+  {
+   "id": "instruct-11",
+   "cat": "instruct",
+   "turns": [
+    "write a short sentence using the word happy"
+   ],
+   "refs": {
+    "0": "sentence containing happy"
+   }
+  },
+  {
+   "id": "instruct-12",
+   "cat": "instruct",
+   "turns": [
+    "explain what a computer is in simple words"
+   ],
+   "refs": {
+    "0": "a machine that processes information/does tasks"
+   }
+  },
+  {
+   "id": "instruct-13",
+   "cat": "instruct",
+   "turns": [
+    "tell me a fun fact"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "instruct-14",
+   "cat": "instruct",
+   "turns": [
+    "write a two line poem about cats"
+   ],
+   "refs": {
+    "0": "short poem about cats"
+   }
+  },
+  {
+   "id": "chat-00",
+   "cat": "chat",
+   "turns": [
+    "hi"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-01",
+   "cat": "chat",
+   "turns": [
+    "Hello!"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-02",
+   "cat": "chat",
+   "turns": [
+    "hey there"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-03",
+   "cat": "chat",
+   "turns": [
+    "good morning"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-04",
+   "cat": "chat",
+   "turns": [
+    "how are you?"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-05",
+   "cat": "chat",
+   "turns": [
+    "i'm bored"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-06",
+   "cat": "chat",
+   "turns": [
+    "thanks!"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-07",
+   "cat": "chat",
+   "turns": [
+    "lol"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-08",
+   "cat": "chat",
+   "turns": [
+    "that's cool"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-09",
+   "cat": "chat",
+   "turns": [
+    "im kinda tired today"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-10",
+   "cat": "chat",
+   "turns": [
+    "wow that was fast"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-11",
+   "cat": "chat",
+   "turns": [
+    "nice to meet you"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-12",
+   "cat": "chat",
+   "turns": [
+    "what's up"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-13",
+   "cat": "chat",
+   "turns": [
+    "this is fun"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-14",
+   "cat": "chat",
+   "turns": [
+    "i don't get it"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-15",
+   "cat": "chat",
+   "turns": [
+    "you're funny"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "chat-16",
+   "cat": "chat",
+   "turns": [
+    "ok bye"
+   ],
+   "refs": {}
+  },
+  {
+   "id": "identity-00",
+   "cat": "identity",
+   "turns": [
+    "who are you?"
+   ],
+   "refs": {
+    "0": "an AI assistant"
+   }
+  },
+  {
+   "id": "identity-01",
+   "cat": "identity",
+   "turns": [
+    "what's your name"
+   ],
+   "refs": {
+    "0": "has no name"
+   }
+  },
+  {
+   "id": "identity-02",
+   "cat": "identity",
+   "turns": [
+    "are you a robot?"
+   ],
+   "refs": {
+    "0": "an AI program, not human"
+   }
+  },
+  {
+   "id": "identity-03",
+   "cat": "identity",
+   "turns": [
+    "who made you"
+   ],
+   "refs": {
+    "0": "CivAI"
+   }
+  },
+  {
+   "id": "identity-04",
+   "cat": "identity",
+   "turns": [
+    "are you a human?"
+   ],
+   "refs": {
+    "0": "no, an AI"
+   }
+  },
+  {
+   "id": "identity-05",
+   "cat": "identity",
+   "turns": [
+    "how were you trained?"
+   ],
+   "refs": {
+    "0": "trained from scratch in a few minutes"
+   }
+  },
+  {
+   "id": "identity-06",
+   "cat": "identity",
+   "turns": [
+    "are you smart"
+   ],
+   "refs": {
+    "0": "admits being small/limited"
+   }
+  },
+  {
+   "id": "identity-07",
+   "cat": "identity",
+   "turns": [
+    "do you make mistakes?"
+   ],
+   "refs": {
+    "0": "yes"
+   }
+  },
+  {
+   "id": "identity-08",
+   "cat": "identity",
+   "turns": [
+    "what can you do"
+   ],
+   "refs": {
+    "0": "answer simple questions and chat"
+   }
+  },
+  {
+   "id": "identity-09",
+   "cat": "identity",
+   "turns": [
+    "are you chatgpt?"
+   ],
+   "refs": {
+    "0": "no, a small AI made by CivAI"
+   }
+  },
+  {
+   "id": "multi-00",
+   "cat": "multi",
+   "turns": [
+    "hi",
+    "what's the capital of Italy?",
+    "what language do they speak there?",
+    "thanks",
+    "what's 4 plus 5?",
+    "ok bye"
+   ],
+   "refs": {
+    "1": "Rome",
+    "2": "Italian",
+    "4": "9"
+   }
+  },
+  {
+   "id": "multi-01",
+   "cat": "multi",
+   "turns": [
+    "hello there",
+    "who are you?",
+    "who made you?",
+    "are you always right?",
+    "ha fair enough",
+    "goodbye"
+   ],
+   "refs": {
+    "1": "an AI assistant",
+    "2": "CivAI",
+    "3": "no, it makes mistakes"
+   }
+  },
+  {
+   "id": "multi-02",
+   "cat": "multi",
+   "turns": [
+    "what color is grass",
+    "and what color is the sky?",
+    "which is bigger, the sun or the moon?",
+    "wow ok",
+    "tell me a joke",
+    "haha bye"
+   ],
+   "refs": {
+    "0": "green",
+    "1": "blue",
+    "2": "the sun"
+   }
+  },
+  {
+   "id": "multi-03",
+   "cat": "multi",
+   "turns": [
+    "i'm bored",
+    "can you tell me something fun?",
+    "what animal is the fastest on land?",
+    "how fast is it?",
+    "cool thanks",
+    "see you"
+   ],
+   "refs": {
+    "2": "cheetah",
+    "3": "about 60-70 mph (around 100 km/h)"
+   }
+  },
+  {
+   "id": "multi-04",
+   "cat": "multi",
+   "turns": [
+    "what's 6 plus 2?",
+    "now add 5 to that",
+    "is that more than 10?",
+    "ok name a color",
+    "thanks!",
+    "bye"
+   ],
+   "refs": {
+    "0": "8",
+    "1": "13",
+    "2": "yes"
+   }
+  },
+  {
+   "id": "multi-05",
+   "cat": "multi",
+   "turns": [
+    "who wrote romeo and juliet?",
+    "what country was he from?",
+    "is that country in Europe?",
+    "write one sentence about love",
+    "ok thanks",
+    "bye"
+   ],
+   "refs": {
+    "0": "Shakespeare",
+    "1": "England",
+    "2": "yes"
+   }
+  },
+  {
+   "id": "multi-06",
+   "cat": "multi",
+   "turns": [
+    "good morning",
+    "how many days are in a week?",
+    "can you name them?",
+    "what day comes after Monday?",
+    "i like fridays",
+    "bye for now"
+   ],
+   "refs": {
+    "1": "seven",
+    "2": "Monday through Sunday",
+    "3": "Tuesday"
+   }
+  },
+  {
+   "id": "multi-07",
+   "cat": "multi",
+   "turns": [
+    "hey what's your name?",
+    "do you have feelings?",
+    "ok. what is the biggest ocean?",
+    "do fish live in it?",
+    "that's neat",
+    "goodbye"
+   ],
+   "refs": {
+    "0": "has no name, an AI",
+    "1": "no, it is an AI",
+    "2": "Pacific",
+    "3": "yes"
+   }
+  }
+ ]
+}

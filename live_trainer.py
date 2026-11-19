@@ -49,7 +49,7 @@ CONVERSATIONS = [1568, 1812]
 PROMPT_TOKENS = 14  # a page's prompt is at least this long, and ends where a word does
 # Dense at the start, where the text changes fastest. The final step is always sampled.
 PRETRAIN_SAMPLE_STEPS = {0, 10, 25, 50, 100, 150, 200, 300, 400, 500, 650, 800, 1000, 1150}
-TUNE_SAMPLE_EVERY = 40
+TUNE_SAMPLE_EVERY = 120
 PROGRESS_EVERY = 10
 SAMPLE_TOKENS = 24
 REPLY_TOKENS = 40

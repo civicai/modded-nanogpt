@@ -9,12 +9,16 @@ Both run the same phase: reset the optimizer's running statistics, give the thre
 starting point, then take a few hundred ordinary training steps on pre-tokenized conversations
 (see chat_data.py and chat_format.py). The result is saved as state_tuned.pt beside the run's log.
 
+The defaults are the ones the graded benchmark (chat_bench.py, chat_judge.py) chose: the "plain"
+mix of short, direct exchanges, at the pretraining learning rate. The model takes most of what it
+can say about the world from these conversations, so they matter more than anything else here.
+
 Environment:
-    TUNE_DATA         mix name under the chat data folder (default "short")
+    TUNE_DATA         mix name under the chat data folder (default "plain")
     TUNE_NAME         a name for the model; the mix's identity conversations are rewritten to say it
     TUNE_DATASET      path of a JSON file of extra training data to add to the mix (chat_data.clean_dataset)
-    TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 240)
-    TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 0.25)
+    TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 720)
+    TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 1.0)
     TUNE_USER_WEIGHT  weight of the loss on tokens outside the assistant's replies; 0 learns only to reply (default 1)
     TUNE_SEED_TOKENS  "0" leaves the chat tokens' rows as pretraining left them (default "1")
     TUNE_FINEWEB_VAL  "1" also measures FineWeb validation loss before and after (default "0")
@@ -46,9 +50,9 @@ FINAL_LR_FRACTION = 0.1
 
 @dataclass
 class TuneConfig:
-    data: str = "short"
-    steps: int = 240
-    lr: float = 0.25
+    data: str = "plain"
+    steps: int = 720
+    lr: float = 1.0
     seed_tokens: bool = True
     fineweb_val: bool = False
     samples: bool = True

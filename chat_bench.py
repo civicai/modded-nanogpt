@@ -10,6 +10,7 @@ forward pass extends all of them by one token.
 
 Environment:
     BENCH_LAYOUT  "matched" (default) or "alone": each prompt first in a sequence of its own
+    BENCH_FILE    another prompt set in the same form, in place of evals/chat_bench.json
     BENCH_SAMPLES how many times each prompt is asked (default 2)
     BENCH_TEMPERATURE, BENCH_TOP_K  sampling settings, in place of the live demo's 0.6 and 20
     BENCH_DIAG    "1" only reports how much a prompt's place in the sequence changes its answer
@@ -24,7 +25,7 @@ import torch
 import generate
 from chat_format import ASSISTANT_ID, CHAT_VOCAB, END_ID, EOT_ID, USER_ID, render_conversation, render_prompt
 
-BENCH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evals", "chat_bench.json")
+BENCH_FILE = os.environ.get("BENCH_FILE") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "evals", "chat_bench.json")
 SAMPLES = int(os.environ.get("BENCH_SAMPLES", "2"))
 TEMPERATURE = float(os.environ.get("BENCH_TEMPERATURE", "0.6"))
 TOP_K = int(os.environ.get("BENCH_TOP_K", "20"))

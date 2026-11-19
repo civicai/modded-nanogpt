@@ -60,10 +60,10 @@ MIXES = {
     "medium": dict(max_total=384, max_reply=128, max_user=128, shorten=True,
                    sources={"smoltalk": 1, "alpaca": 1, "everyday": 4, "identity": 8}),
 }
-# The "plain" mixes are built around the kind of exchange a model this small can manage: one plain
-# question or remark, one short direct reply (the "synth" and "wiki" sources). They take only a
-# share of the longer, harder SmolTalk conversations, whose shortened replies often rephrase the
-# question instead of answering it.
+# The "plain" mixes are built around the kind of exchange a model this small can manage: a plain
+# question or remark, a short direct reply, sometimes for several turns (the "synth" and "wiki"
+# sources). They take only a share of the longer, harder SmolTalk conversations, whose shortened
+# replies often rephrase the question instead of answering it. "plain" is the mix tuning uses.
 MIXES.update({
     "plain": dict(max_total=512, max_reply=64, max_user=96, shorten=True,
                   sources={"synth": 1, "wiki": 1, "alpaca": 1, "everyday": 2, "identity": 8, "smoltalk": 0.15}),

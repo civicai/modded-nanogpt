@@ -10,6 +10,13 @@
   uvx modal run modal_run.py::publish_run --run-id <id>   # make other services serve this run (CPU)
   uvx modal deploy modal_run.py               # deploys LiveRun, Inference and ChatInference for other services to call
 
+Experiments, which publish nothing and keep their runs under exp/ on the Volume:
+
+  uvx modal run modal_run.py::exp --name <batch> --configs <file.json>   # trainer configurations, one after another on one container
+  uvx modal run modal_run.py::bench --checkpoint <state_tuned.pt> --out <name>   # benchmark replies from a tuned model (1 GPU)
+  python chat_judge.py <replies.json>                                    # grade them (needs OPENROUTER_API_KEY, no GPU)
+  uvx modal run modal_run.py::promote --run-id <id>                      # copy an experiment's run to where it can be served
+
 Once deployed, live.py drives LiveRun: one held 4xH200 container that pretrains, serves and chat-tunes on cue.
 """
 import os
@@ -280,7 +287,7 @@ def tune_results(run_ids: list[str]) -> dict:
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=1800, cpu=16, memory=65536)
-def tune4(base_run_id: str = BASE_RUN_ID, data: str = "short", steps: int = 240, lr: float = 0.25,
+def tune4(base_run_id: str = BASE_RUN_ID, data: str = "plain", steps: int = 720, lr: float = 1.0,
           seed_tokens: bool = True, fineweb_val: bool = False, samples: bool = True,
           refresh_compile_cache: bool = False, publish: bool = True, name: str = "", dataset: str = ""):
     """Chat-tune a saved 4-GPU base model. Saves runs/<new id>/state_tuned.pt and returns the run's numbers.
@@ -301,7 +308,7 @@ def tune4(base_run_id: str = BASE_RUN_ID, data: str = "short", steps: int = 240,
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=3600, cpu=16, memory=65536)
-def train_and_tune4(data: str = "short", steps: int = 240, lr: float = 0.25, seed_tokens: bool = True,
+def train_and_tune4(data: str = "plain", steps: int = 720, lr: float = 1.0, seed_tokens: bool = True,
                     fineweb_val: bool = False, samples: bool = True, refresh_compile_cache: bool = False):
     """Pretrain from scratch, then chat-tune, in one job. The run folder gets both checkpoints."""
     env = dict(FINETUNE_AFTER="1", **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
@@ -611,13 +618,15 @@ def promote(run_id: str, publish: bool = False):
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=1800, cpu=8, memory=32768)
-def bench(checkpoint: str, out: str, diag: bool = False, layout: str = "matched", samples: int = 2, temperature: float = 0.6, top_k: int = 20):
+def bench(checkpoint: str, out: str, diag: bool = False, layout: str = "matched", samples: int = 2, temperature: float = 0.6, top_k: int = 20,
+          prompts: str = ""):
     """One GPU: answer the benchmark prompts with a tuned checkpoint (a path on the Volume) and
     write the replies to exp/results/<out>.json."""
     link_data()
     os.makedirs(os.path.dirname(f"{EXP}/results/{out}"), exist_ok=True)
     env = dict(os.environ, GENERATE_FROM=checkpoint, CHAT_BENCH="1", BENCH_OUT=f"{EXP}/results/{out}.json", CHECK_VAL="0", BENCH_DIAG=str(int(diag)), BENCH_LAYOUT=layout,
-               BENCH_SAMPLES=str(samples), BENCH_TEMPERATURE=str(temperature), BENCH_TOP_K=str(top_k))
+               BENCH_SAMPLES=str(samples), BENCH_TEMPERATURE=str(temperature), BENCH_TOP_K=str(top_k),
+               BENCH_FILE=f"{REPO}/{prompts}" if prompts else "")
     subprocess.run(["torchrun", "--standalone", "--nproc_per_node=1", "train_gpt.py"], cwd=REPO, env=env, check=True)
     volume.commit()
 
