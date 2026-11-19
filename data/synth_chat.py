@@ -40,6 +40,7 @@ STYLE = """Rules for every conversation:
 - No lists with line breaks, no markdown, no emoji, no "As an AI". Never begin a reply by repeating the question.
 - The assistant is a small AI assistant. Only if asked about its own tastes or life does it say, briefly and warmly, that it is an AI, and then still gives a helpful reply.
 - Keep to things nearly everyone knows: what a bright ten-year-old could ask or answer. No obscure facts, no technical terms, no numbers that are easy to get wrong."""
+HOP = "Each conversation has between 4 and 7 exchanges (user, assistant, user, assistant, ...) and wanders the way real chats do. About half open with a greeting or small talk that the assistant answers briefly. The user asks or says a few things about the topic, then moves on to the second topic, sometimes abruptly. Include follow-ups that depend on what was just said ('Why?', 'And the other one?', 'Tell me more.'), and in some conversations a question that looks back ('What were we talking about before?', a detail the user mentioned earlier). Each reply answers only the latest message, without dragging in the earlier subject. Some end with thanks or goodbye and a short reply. The assistant never repeats an earlier reply and never gives itself a name."
 KINDS = {
     "question": (24, "Each conversation is one simple factual question about the topic and its answer. Cover the questions people most often ask about this topic, the easy and obvious ones first (what, which, who, where, how many, what color, is it true that)."),
     "why": (16, "Each conversation is one curious 'why', 'how' or 'what is' question about the topic, as a child or a curious adult might ask, with a short, simple and correct explanation."),
@@ -47,8 +48,14 @@ KINDS = {
     "remark": (16, "Each conversation opens with something that is NOT a request for facts: the user says what they did, like, feel or plan, or makes small talk about the topic. The assistant gives a short, warm, fitting reply. About half the replies end with a simple question back."),
     "chat": (8, "Each conversation has between 3 and 6 exchanges (user, assistant, user, assistant, ...) that stay loosely on the topic: a mix of simple questions, follow-ups that depend on what was just said ('And what about ...?', 'Why?', 'Which one is bigger?'), and remarks. Some end with the user saying thanks or goodbye and the assistant replying. The assistant never repeats an earlier reply."),
     "sense": (20, "Each conversation is one everyday common-sense question about the topic and its answer: what something is used for, where you find it, what you do with it, whether it can do something (yes or no, with a short reason), which of two things is bigger, heavier, faster, hotter or older, what happens if, what comes before or after, what it is made of, what you need for it."),
-    "hop": (8, "Each conversation has between 4 and 7 exchanges (user, assistant, user, assistant, ...) and wanders the way real chats do. About half open with a greeting or small talk that the assistant answers briefly. The user asks or says a few things about the topic, then moves on to the second topic, sometimes abruptly. Include follow-ups that depend on what was just said ('Why?', 'And the other one?', 'Tell me more.'), and in some conversations a question that looks back ('What were we talking about before?', a detail the user mentioned earlier). Each reply answers only the latest message, without dragging in the earlier subject. Some end with thanks or goodbye and a short reply. The assistant never repeats an earlier reply and never gives itself a name."),
+    "hop": (8, HOP),
+    "hop2": (8, HOP),
+    "long": (5, "Each conversation has between 7 and 10 exchanges (user, assistant, user, assistant, ...) and wanders the way a long chat with a chatbot does: a greeting, a few questions about the topic, a remark, a change of subject to the second topic, a request ('tell me a joke', 'give me a tip'), a reaction to the reply ('that was funny', 'I don't get it', 'another one'), a question about the assistant itself, a look back at something said earlier, a goodbye. Each reply answers only the latest message. The assistant never repeats an earlier reply, even when asked for 'another one', and never gives itself a name."),
+    "write": (16, "Each conversation is one small creative or word request connected to the topic, which the assistant carries out briefly: a two-line poem, a joke, a riddle, a one-sentence story, a slogan, a short birthday or thank-you message, a word that rhymes with a given word, the opposite of a word, a word that starts with a given letter, how to spell a word, finishing a sentence the user starts, saying something in a friendly or funny way."),
+    "smalltalk": (16, "Each conversation opens with small talk aimed at the assistant, only loosely tied to the topic: a greeting, 'how are you', a feeling the user has, good or bad news, a compliment or a complaint about the assistant, a question about what the assistant likes or thinks ('do you like music?', 'what is your favorite food?'), a thank-you, a goodbye. The assistant gives a short, warm, natural reply that fits exactly what was said; for good news it is glad, for bad news it is kind. About a third of the replies end with a simple question back."),
 }
+# Kinds written about two topics; the number picks which second topic a topic is paired with.
+PAIRED = dict(hop=7919, hop2=104729, long=1299709)
 FORMAT = """Return only JSON: a list of conversations, each a list of strings that alternate user, assistant, user, assistant. Example: [["What do cows eat?", "Cows eat grass and hay."], ...]"""
 
 
@@ -82,7 +89,7 @@ def topics_of(domain, key, count, known):
 
 def conversations_of(topic, kind, key, second=""):
     count, brief = KINDS[kind]
-    about = f"the topic '{topic}'" + (f" and then the second topic '{second}'" if kind == "hop" else "")
+    about = f"the topic '{topic}'" + (f" and then the second topic '{second}'" if kind in PAIRED else "")
     prompt = f"Write {count} different short conversations between a user and an assistant about {about}.\n\n{brief}\n\n{STYLE}\n\n{FORMAT}"
     written, usage = ask(prompt, key)
     kept = []
@@ -148,7 +155,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument("--topics", type=int, default=0, help="stop after this many topics (0 for all)")
-    parser.add_argument("--kinds", default="question,why,task,remark,chat,sense,hop")
+    parser.add_argument("--kinds", default=",".join(KINDS))
     parser.add_argument("--per-domain", type=int, default=10, help="topics to write about in each domain")
     parser.add_argument("--sums-only", action="store_true", help="write only the sums, which need no author")
     args = parser.parse_args()
@@ -197,7 +204,7 @@ def main():
     written = 0
     with open(args.out, "a") as out, concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
         place = {topic: index for index, topic in enumerate(topics)}
-        futures = [pool.submit(conversations_of, topic, kind, key, topics[(place[topic] * 7919 + 13) % len(topics)]) for topic, kind in jobs]
+        futures = [pool.submit(conversations_of, topic, kind, key, topics[(place[topic] * PAIRED.get(kind, 1) + 13) % len(topics)]) for topic, kind in jobs]
         for future in concurrent.futures.as_completed(futures):
             try:
                 rows, used = future.result()
