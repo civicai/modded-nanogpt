@@ -103,51 +103,63 @@ def conversations_of(topic, kind, key, second=""):
 NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"]
 
 
-def sums(rng, copies=6):
-    """Small sums and number questions, each asked `copies` times in different words. Every answer
-    states the whole fact, so the model sees the numbers together each time."""
+def sums(rng, copies=30):
+    """Small sums and number questions, each asked `copies` times in different words. The model
+    cannot calculate; it can only remember, so each fact is always answered in the same words and
+    the tables are kept small enough to be seen often."""
     def spell(n):
         return NUMBER_WORDS[n] if n < len(NUMBER_WORDS) else str(n)
+    add = ["What is {a} + {b}?", "what is {a}+{b}", "{a} + {b}", "{a}+{b}", "What's {a} plus {b}?", "whats {a} + {b}", "What is {a} plus {b}?",
+           "how much is {a} plus {b}", "{a} plus {b}?", "Can you add {a} and {b}?", "{a} + {b} = ?", "what does {a} + {b} equal"]
+    subtract = ["What is {a} - {b}?", "what is {a}-{b}", "{a} - {b}", "What is {a} minus {b}?", "what's {a} minus {b}?", "{a} minus {b}",
+                "What's {a} take away {b}?", "{a} - {b} = ?", "how much is {a} minus {b}"]
+    times = ["What is {a} times {b}?", "what is {a} times {b}", "What is {a} x {b}?", "{a} x {b}", "{a} times {b}?", "What's {a} multiplied by {b}?",
+             "what is {a}*{b}", "{a} * {b}", "whats {a} times {b}"]
+    divide = ["What is {a} divided by {b}?", "what is {a} divided by {b}", "{a} / {b}", "What's {a} divided by {b}?", "{a} divided by {b}?", "what is {a}/{b}"]
     facts = []
-    for a in range(0, 13):
-        for b in range(0, 13):
-            facts.append((["What is {a} + {b}?", "What's {a} plus {b}?", "{a} + {b} = ?", "What is {a} plus {b}?", "How much is {a} + {b}?", "what is {a}+{b}", "{a} plus {b}?", "Can you add {a} and {b}?"],
-                          ["{a} + {b} is {c}.", "{a} plus {b} is {c}.", "{a} + {b} = {c}.", "{a} plus {b} equals {c}."], a, b, a + b))
-            if a >= b:
-                facts.append((["What is {a} - {b}?", "What is {a} minus {b}?", "{a} - {b} = ?", "What's {a} take away {b}?", "what is {a}-{b}"],
-                              ["{a} - {b} is {c}.", "{a} minus {b} is {c}.", "{a} - {b} = {c}.", "{a} take away {b} is {c}."], a, b, a - b))
-            if a <= 10 and b <= 10:
-                facts.append((["What is {a} times {b}?", "What is {a} x {b}?", "What's {a} multiplied by {b}?", "{a} times {b}?", "What is {a} * {b}?"],
-                              ["{a} times {b} is {c}.", "{a} x {b} = {c}.", "{a} times {b} equals {c}."], a, b, a * b))
-            if a != b:
-                facts.append((["Which is bigger, {a} or {b}?", "Which number is larger, {a} or {b}?", "Is {a} or {b} the bigger number?", "Which is more, {a} or {b}?"],
-                              ["{c} is bigger than {d}.", "{c} is the bigger number.", "{c} is more than {d}."], a, b, max(a, b)))
-                facts.append((["Which is smaller, {a} or {b}?", "Which number is less, {a} or {b}?"],
-                              ["{d} is smaller than {c}.", "{d} is the smaller number."], a, b, max(a, b)))
+    for x in range(0, 13):
+        for y in range(0, 13):
+            facts.append((add, "{a} + {b} = {c}.", dict(a=x, b=y, c=x + y)))
+            facts.append((times, "{a} times {b} is {c}.", dict(a=x, b=y, c=x * y)))
+            if x != y:
+                facts.append((["Which is bigger, {a} or {b}?", "which is bigger {a} or {b}", "Which number is larger, {a} or {b}?", "Which is more, {a} or {b}?"],
+                              "{c} is bigger than {d}.", dict(a=x, b=y, c=max(x, y), d=min(x, y))))
+                facts.append((["Which is smaller, {a} or {b}?", "which is smaller {a} or {b}", "Which number is less, {a} or {b}?"],
+                              "{d} is smaller than {c}.", dict(a=x, b=y, c=max(x, y), d=min(x, y))))
+    for x in range(0, 21):
+        for y in range(0, min(x, 12) + 1):
+            facts.append((subtract, "{a} - {b} = {c}.", dict(a=x, b=y, c=x - y)))
+    for y in range(1, 11):
+        for z in range(1, 11):
+            facts.append((divide, "{a} divided by {b} is {c}.", dict(a=y * z, b=y, c=z)))
     for n in range(0, 40):
-        facts.append((["What number comes after {a}?", "What comes after {a}?", "What is the next number after {a}?"],
-                      ["{c} comes after {a}.", "The number after {a} is {c}."], n, 0, n + 1))
+        facts.append((["What number comes after {a}?", "What comes after {a}?", "what comes after {a}", "What is the next number after {a}?"],
+                      "{c} comes after {a}.", dict(a=n, c=n + 1)))
         if n:
-            facts.append((["What number comes before {a}?", "What comes before {a}?"], ["{c} comes before {a}.", "The number before {a} is {c}."], n, 0, n - 1))
+            facts.append((["What number comes before {a}?", "What comes before {a}?", "what comes before {a}"], "{c} comes before {a}.", dict(a=n, c=n - 1)))
         if n % 2 == 0 and n:
-            facts.append((["What is half of {a}?", "What's half of {a}?"], ["Half of {a} is {c}."], n, 0, n // 2))
-            facts.append((["What is double {c}?", "What is {c} doubled?", "What is twice {c}?"], ["Double {c} is {a}.", "Twice {c} is {a}."], n, 0, n // 2))
+            facts.append((["What is half of {a}?", "What's half of {a}?", "half of {a}"], "Half of {a} is {c}.", dict(a=n, c=n // 2)))
+            facts.append((["What is double {c}?", "What is {c} doubled?", "What is twice {c}?"], "Double {c} is {a}.", dict(a=n, c=n // 2)))
+    for low in (0, 1):
+        for high in range(low + 2, 21):
+            facts.append((["Count from {a} to {b}.", "count from {a} to {b}", "Can you count from {a} to {b}?"] + (["Count to {b}.", "count to {b}", "Can you count to {b}?"] if low == 1 else []),
+                          ", ".join(str(n) for n in range(low, high + 1)) + ".", dict(a=low, b=high)))
+    things = ["apples", "cookies", "books", "pencils", "balloons", "coins", "toys", "stickers", "oranges", "marbles"]
+    for x in range(1, 10):
+        for y in range(1, 10):
+            facts.append((["If I have {a} {t} and get {b} more, how many {t} do I have?", "I had {a} {t} and found {b} more. How many now?",
+                           "if i have {a} {t} and you give me {b} more how many do i have"], "You have {c} {t}, because {a} + {b} = {c}.", dict(a=x, b=y, c=x + y)))
+            if x > y:
+                facts.append((["If I have {a} {t} and eat {b}, how many are left?", "I had {a} {t} and gave away {b}. How many do I have now?",
+                               "If I have {a} {t} and lose {b}, how many are left?", "i have {a} {t} and give {b} to a friend. how many left"],
+                              "You have {c} {t} left, because {a} - {b} = {c}.", dict(a=x, b=y, c=x - y)))
     rows = []
     for _ in range(copies):
-        for questions, answers, a, b, c in facts:
-            fill = dict(a=a, b=b, c=c, d=min(a, b))
-            if rng.random() < 0.15:
-                fill = {name: spell(value) for name, value in fill.items()}
-            question, answer = rng.choice(questions).format(**fill), rng.choice(answers).format(**fill)
-            rows.append(dict(kind="sum", topic="sums", messages=[dict(role="user", content=question[0].upper() + question[1:]),
-                                                                  dict(role="assistant", content=answer[0].upper() + answer[1:])]))
-        for a in range(1, 7):
-            for b in range(1, 7):
-                thing = rng.choice(["apples", "cookies", "books", "pencils", "balloons", "coins", "toys", "stickers"])
-                rows.append(dict(kind="sum", topic="sums", messages=[
-                    dict(role="user", content=rng.choice([f"If I have {spell(a)} {thing} and get {spell(b)} more, how many {thing} do I have?",
-                                                          f"I had {spell(a)} {thing} and found {spell(b)} more. How many now?"])),
-                    dict(role="assistant", content=f"You have {spell(a + b)} {thing}, because {a} plus {b} is {a + b}.")]))
+        for questions, answer, fill in facts:
+            fill = dict(fill, t=rng.choice(things))
+            asked = {name: spell(value) if isinstance(value, int) and rng.random() < 0.12 else value for name, value in fill.items()}
+            question = rng.choice(questions).format(**asked)
+            rows.append(dict(kind="sum", topic="sums", messages=[dict(role="user", content=question), dict(role="assistant", content=answer.format(**fill))]))
     return rows
 
 
