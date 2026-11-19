@@ -2234,6 +2234,8 @@ def distributed_data_generator(filename_pattern: str, num_tokens: int, max_seq_l
 
         _cum_lengths = torch.full((max_num_docs,), num_tokens_local)
         _cum_lengths[0] = 0
+        # The cap is a compiled shape. A batch with more documents than it allows lets its last few share attention.
+        cum_lengths = cum_lengths[:max_num_docs - 1]
         _cum_lengths[1:len(cum_lengths) + 1] = cum_lengths
 
         # Cast to int32 on CPU before transfer to avoid dtype conversion during .to()
