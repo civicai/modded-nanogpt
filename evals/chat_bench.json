@@ -1,5 +1,5 @@
 {
- "version": 1,
+ "version": 2,
  "items": [
   {
    "id": "fact-00",
@@ -1272,6 +1272,57 @@
     "3": "4",
     "4": "the blue whale",
     "6": "CivAI"
+   }
+  },
+  {
+   "id": "long-00",
+   "cat": "long",
+   "turns": [
+    "Hi",
+    "How are you?",
+    "What can you do?",
+    "Tell me something interesting.",
+    "Tell me another one.",
+    "What is the weather like?",
+    "Do you like cats or dogs?",
+    "Why?",
+    "What should I eat for lunch?",
+    "I don't like that. Something else?",
+    "What is your favorite color?",
+    "Tell me a joke.",
+    "Another joke please.",
+    "That was not funny.",
+    "What did I ask you first?",
+    "Okay bye."
+   ],
+   "refs": {}
+  },
+  {
+   "id": "long-01",
+   "cat": "long",
+   "turns": [
+    "Hello, I'm Sam.",
+    "I live near the sea.",
+    "What animals live in the sea?",
+    "Which one is the biggest?",
+    "Are sharks dangerous?",
+    "What do they eat?",
+    "I like to swim. Do you?",
+    "What is my name?",
+    "Can you tell me about boats?",
+    "How do boats float?",
+    "What is the sea made of?",
+    "Why is it salty?",
+    "What else is blue?",
+    "Tell me about the sky.",
+    "Thank you for the chat.",
+    "Goodbye!"
+   ],
+   "refs": {
+    "2": "fish, whales, sharks, dolphins, crabs and so on",
+    "3": "the blue whale",
+    "7": "Sam",
+    "10": "salt water"
    }
   }
  ]

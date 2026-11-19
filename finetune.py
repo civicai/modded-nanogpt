@@ -38,7 +38,7 @@ from chat_format import SEED_TOKENS, assistant_target_mask
 BATCH_TOKENS = 8 * 2048 * 8  # per optimizer step, the same as the first pretraining stage
 DOC_CAP = 2048               # conversations per rank per batch; they are far shorter than web pages
 VAL_BATCHES = 4              # under one pass of the smaller held-out set on 4 GPUs
-VAL_FOLDERS = ("val", "val_short")
+VAL_FOLDERS = ("val", "val_short", "val_plain")
 MUON_MOMENTUM = 0.85         # where pretraining's momentum schedule starts and ends
 WARMUP_FRACTION = 0.05
 FINAL_LR_FRACTION = 0.1

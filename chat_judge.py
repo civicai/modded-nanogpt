@@ -86,8 +86,12 @@ def mechanical(transcript):
 
 
 def summarize(transcripts):
+    """The headline numbers leave out the sixteen-turn conversations ("long"), which are reported
+    apart: they measure how a chat holds up as it grows, and were added after the first results."""
     def share(rows, test):
         return round(sum(test(row) for row in rows) / len(rows), 3) if rows else None
+    long = [t for t in transcripts if t["cat"] == "long"]
+    transcripts = [t for t in transcripts if t["cat"] != "long"]
     summary = dict(replies=len(transcripts), ok=share(transcripts, lambda t: t["grade"] >= 1), good=share(transcripts, lambda t: t["grade"] == 2),
                    mean_grade=round(sum(t["grade"] for t in transcripts) / len(transcripts), 3),
                    leak=share([t for t in transcripts if t["cat"] != "identity"], lambda t: t["leak"]),
@@ -96,6 +100,10 @@ def summarize(transcripts):
                    cut_off=share(transcripts, lambda t: t["cut_off"]), mean_words=round(sum(t["words"] for t in transcripts) / len(transcripts), 1))
     summary["by_cat"] = {cat: dict(ok=share(rows, lambda t: t["grade"] >= 1), good=share(rows, lambda t: t["grade"] == 2))
                          for cat in dict.fromkeys(t["cat"] for t in transcripts) for rows in [[t for t in transcripts if t["cat"] == cat]]}
+    if long:
+        late = [t for t in long if t["turn"] >= 8]
+        summary["long"] = dict(ok=share(long, lambda t: t["grade"] >= 1), good=share(long, lambda t: t["grade"] == 2),
+                               late_ok=share(late, lambda t: t["grade"] >= 1), repeats_own=share(long[2:], lambda t: t["repeats_own"]))
     return summary
 
 

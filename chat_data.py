@@ -60,13 +60,32 @@ MIXES = {
     "medium": dict(max_total=384, max_reply=128, max_user=128, shorten=True,
                    sources={"smoltalk": 1, "alpaca": 1, "everyday": 4, "identity": 8}),
 }
+# The "plain" mixes are built around the kind of exchange a model this small can manage: one plain
+# question or remark, one short direct reply (the "synth" and "wiki" sources). They take only a
+# share of the longer, harder SmolTalk conversations, whose shortened replies often rephrase the
+# question instead of answering it.
+MIXES.update({
+    "plain": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
+                  sources={"synth": 2, "wiki": 1, "alpaca": 1, "everyday": 2, "identity": 4, "smoltalk": 0.15}),
+    "plain_only": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
+                       sources={"synth": 3, "wiki": 1, "everyday": 2, "identity": 4}),
+    "plain_synth": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
+                        sources={"synth": 4, "everyday": 2, "identity": 4}),
+    "plain_smol": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
+                       sources={"synth": 2, "wiki": 1, "alpaca": 1, "everyday": 4, "identity": 8, "smoltalk": 1}),
+})
 # Held-out sets, cut from the same conversations whatever the limits: "val" matches the unshortened
-# mixes and "val_short" the shortened ones.
+# mixes and "val_short" the shortened ones. "val_plain" holds out the plain exchanges.
 VAL_SETS = {
-    "val": dict(max_total=384, max_reply=160, max_user=160, shorten=False),
-    "val_short": dict(max_total=256, max_reply=64, max_user=96, shorten=True),
+    "val": dict(max_total=384, max_reply=160, max_user=160, shorten=False, sources=("smoltalk", "everyday", "alpaca")),
+    "val_short": dict(max_total=256, max_reply=64, max_user=96, shorten=True, sources=("smoltalk", "everyday", "alpaca")),
+    "val_plain": dict(max_total=256, max_reply=64, max_user=96, shorten=True, sources=("synth", "wiki")),
 }
-VAL_SOURCES = ("smoltalk", "everyday", "alpaca")
+VAL_SOURCES = ("smoltalk", "everyday", "alpaca", "synth", "wiki")
+SYNTH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "synth_chat.jsonl.gz")
+BENCH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evals", "chat_bench.json")
+WIKI_ARTICLES = 20_000       # the longest Simple English Wikipedia articles, as a stand-in for the best known
+WIKI_REPLY_WORDS = (6, 45)   # an opening sentence outside these limits is not used as a reply
 CHARS_PER_REPLY_TOKEN = 3.5  # a shortened reply is cut by characters first, then checked in tokens
 MIN_SHORTENED_WORDS = 5       # a cut-down reply shorter than this is an opener ("Sure!"), not an answer
 # Parts of Smol-SmolTalk left out: code is beyond a 124M-parameter model, and the everyday
@@ -308,10 +327,38 @@ def write_tuned_mix(source, out, name="", dataset=None, seed=SEED):
     return counts
 
 
+def plain_key(text):
+    """A message with case, punctuation and spacing removed, to compare two of them."""
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def wiki_conversations(articles, rng):
+    """One exchange for each of the longest articles: a request to hear about its subject, answered
+    with the article's opening sentence. `articles` is [(title, text)]."""
+    conversations = []
+    for title, text in sorted(articles, key=lambda article: -len(article[1]))[:3 * WIKI_ARTICLES]:
+        opening = SENTENCE_END.split(text.strip().split("\n")[0])[0].strip()
+        if not opening.endswith(".") or not WIKI_REPLY_WORDS[0] <= len(opening.split()) <= WIKI_REPLY_WORDS[1]:
+            continue
+        if "(" in title or ":" in title or title[0].isdigit() or len(title.split()) > 4 or title.startswith("List of"):
+            continue
+        # A title is a common noun if the opening uses it uncapitalized ("A dog is ..."), a name otherwise.
+        subject = title[0].lower() + title[1:] if re.search(rf"\b{re.escape(title[0].lower() + title[1:])}", opening) else title
+        person = bool(re.search(r"\(born |\(\d{3,4}|\bborn\b", opening))
+        asks = ["Who was {s}?" if " was " in opening else "Who is {s}?", "Tell me about {s}."] if person else \
+            ["What is {s}?", "Tell me about {s}.", "What do you know about {s}?", "Explain {s}.", "{s}?"]
+        opening = re.sub(r"\s*\([^()]*\)", "", opening)  # pronunciations and dates in brackets
+        conversations.append([dict(role="user", content=rng.choice(asks).format(s=subject)), dict(role="assistant", content=opening)])
+        if len(conversations) == WIKI_ARTICLES:
+            break
+    return conversations
+
+
 def load_sources():
     """Returns {source name: [conversation]}, each conversation a list of {"role", "content"}."""
+    import gzip
     from datasets import load_dataset
-    sources = {"identity": identity_conversations(), "smoltalk": [], "everyday": [], "alpaca": []}
+    sources = {"identity": identity_conversations(), "smoltalk": [], "everyday": [], "alpaca": [], "synth": [], "wiki": []}
     smoltalk_seen = {}
     for row in load_dataset("HuggingFaceTB/smol-smoltalk", split="train"):
         smoltalk_seen[row["source"]] = smoltalk_seen.get(row["source"], 0) + 1
@@ -324,6 +371,21 @@ def load_sources():
         if not row["input"].strip():
             sources["alpaca"].append([dict(role="user", content=row["instruction"]),
                                       dict(role="assistant", content=row["output"])])
+    if os.path.exists(SYNTH_FILE):
+        with gzip.open(SYNTH_FILE, "rt") as f:
+            sources["synth"] = [json.loads(line)["messages"] for line in f]
+        random.Random(SEED).shuffle(sources["synth"])
+    wiki = load_dataset("wikimedia/wikipedia", "20231101.simple", split="train")
+    sources["wiki"] = wiki_conversations([(row["title"], row["text"]) for row in wiki], random.Random(SEED))
+    # Nothing the benchmark asks may be in the training data word for word.
+    with open(BENCH_FILE) as f:
+        asked = {plain_key(turn) for item in json.load(f)["items"] for turn in item["turns"] if len(turn.split()) > 2}
+    for name, conversations in sources.items():
+        if name != "identity":
+            # Emptied rather than removed, so that every other conversation keeps its place, which decides what is held out.
+            kept = [[] if any(m["role"] == "user" and plain_key(m["content"]) in asked for m in c) else c for c in conversations]
+            print(f"{name}: {len(conversations)} conversations, {sum(not c for c in kept)} dropped for asking a benchmark question")
+            sources[name] = kept
     return sources
 
 
@@ -443,20 +505,23 @@ def rendered_documents(sources, spec, held_out):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
+    parser.add_argument("--mixes", default="", help="comma-separated mixes to write (default: all)")
     out = parser.parse_args().out
+    wanted = [name for name in parser.parse_args().mixes.split(",") if name] or list(MIXES)
     rng = random.Random(SEED)
     sources = load_sources()
     meta = dict(format=dict(eot=EOT_ID, user=USER_ID, assistant=ASSISTANT_ID, end=END_ID), mixes={}, val={})
 
     for val_name, spec in VAL_SETS.items():
-        by_source = rendered_documents({name: sources[name] for name in VAL_SOURCES}, spec, held_out=True)
-        documents = [d for name in VAL_SOURCES for d in by_source[name]]
+        by_source = rendered_documents({name: sources[name] for name in spec["sources"]}, spec, held_out=True)
+        documents = [d for name in spec["sources"] for d in by_source[name]]
         rng.shuffle(documents)
         tokens, shards = write_set(os.path.join(out, val_name), "chat_val", documents)
         meta["val"][val_name] = dict(**spec, documents=len(documents), tokens=tokens, shards=shards)
         print(f"{val_name}: {len(documents)} documents, {tokens:,} tokens")
 
-    for mix_name, mix in MIXES.items():
+    for mix_name in wanted:
+        mix = MIXES[mix_name]
         by_source = rendered_documents({name: sources[name] for name in mix["sources"]}, mix, held_out=False)
         documents, per_source = [], {}
         for name, repeat in mix["sources"].items():

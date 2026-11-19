@@ -581,6 +581,22 @@ def experiment(name: str, configs: list[dict]):
     return summaries
 
 
+@app.function(image=image, volumes={VOL: volume}, timeout=3 * 3600, cpu=16, memory=65536)
+def prep_exp(commands: list[list[str]]):
+    """CPU-only: run data preparation commands in the repo, one after another, committing the
+    Volume after each (chat_data.py, data/pretrain_mix.py, data/cached_finewebedu10B.py)."""
+    link_data()
+    os.makedirs(f"{EXP}/data", exist_ok=True)
+    if not os.path.exists(f"{REPO}/data/finewebedu10B"):
+        os.makedirs(f"{EXP}/data/finewebedu10B", exist_ok=True)
+        os.symlink(f"{EXP}/data/finewebedu10B", f"{REPO}/data/finewebedu10B")
+    for command in commands:
+        started = time.time()
+        subprocess.run(command, cwd=REPO, check=True)
+        volume.commit()
+        print(f"[prep] {' '.join(command)} took {time.time() - started:.0f}s", flush=True)
+
+
 @app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=1800, cpu=8, memory=32768)
 def bench(checkpoint: str, out: str, diag: bool = False, layout: str = "matched"):
     """One GPU: answer the benchmark prompts with a tuned checkpoint (a path on the Volume) and
@@ -786,3 +802,10 @@ def exp(name: str, configs: str):
         settings = json.load(f)
     for summary in experiment.remote(name, settings):
         print(json.dumps(summary))
+
+
+@app.local_entrypoint()
+def prep_data(commands: str):
+    """Run data preparation commands on a CPU container: `commands` is a JSON list of argument lists."""
+    import json
+    prep_exp.remote(json.loads(commands))
