@@ -429,7 +429,7 @@ class LiveRun:
             yield chunk
 
     @modal.method()
-    async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.6, top_k: int = 20):
+    async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.3, top_k: int = 20):
         """A reply from the tuned model in the trainer's memory, as ChatInference.chat_stream."""
         request = dict(messages=messages, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
         async for chunk in stream_from_server(request, self.session.serving_port("chat")):
@@ -597,6 +597,19 @@ def prep_exp(commands: list[list[str]]):
         print(f"[prep] {' '.join(command)} took {time.time() - started:.0f}s", flush=True)
 
 
+@app.function(image=image, volumes={VOL: volume}, timeout=900)
+def promote(run_id: str, publish: bool = False):
+    """CPU-only: copy an experiment's run from exp/runs/ to runs/, where Inference and ChatInference
+    look for checkpoints, so it can be served by passing them its run id. With `publish` it also
+    becomes the run other services serve. Like any new run, it counts toward the ten that are kept."""
+    import shutil
+    shutil.copytree(f"{EXP}/runs/{run_id}", f"{VOL}/runs/{run_id}", dirs_exist_ok=True)
+    volume.commit()
+    print(f"copied {sorted(os.listdir(f'{VOL}/runs/{run_id}'))} to runs/{run_id}")
+    if publish:
+        publish_run.local(run_id)
+
+
 @app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=1800, cpu=8, memory=32768)
 def bench(checkpoint: str, out: str, diag: bool = False, layout: str = "matched", samples: int = 2, temperature: float = 0.6, top_k: int = 20):
     """One GPU: answer the benchmark prompts with a tuned checkpoint (a path on the Volume) and
@@ -752,7 +765,7 @@ class ChatInference:
         await report_inference("chat", self.run_id or SERVED_CHAT_RUN_ID)
 
     @modal.method()
-    async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.6, top_k: int = 20):
+    async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.3, top_k: int = 20):
         """`messages` is [{"role": "user" | "assistant", "content": str}, ...] ending on a user turn.
         Yields {"text": piece} per token, then {"seconds": total, "stop": "end" | "length"}."""
         request = dict(messages=messages, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
