@@ -559,8 +559,22 @@ async def stream_from_server(request: dict, port: int = SERVE_PORT):
         writer.close()
 
 
+INFERENCE_IDLE_SECONDS = 300  # how long an Inference or ChatInference container outlives its last request
+
+
+async def report_inference(kind: str, run_id: str, up: bool = True):
+    """Tell displays that the 1-GPU container for `kind` ("base" or "chat") is up and was just used,
+    or has stopped. Stored in the live Dict as inference_<kind>: {"up", "run_id", "at"}. A display
+    treats a container as gone INFERENCE_IDLE_SECONDS after `at`, which also covers one that was
+    killed before it could say so."""
+    try:
+        await live_state.put.aio(f"inference_{kind}", dict(up=up, run_id=run_id, at=time.time()))
+    except Exception as error:
+        print(f"could not report the {kind} inference container: {error!r}", flush=True)
+
+
 @app.cls(image=image, volumes={VOL: volume}, gpu="H100", cpu=8, memory=32768,
-         scaledown_window=300, max_containers=1, timeout=600)
+         scaledown_window=INFERENCE_IDLE_SECONDS, max_containers=1, timeout=600)
 class Inference:
     """Text completion from a pretrained model:
     `modal.Cls.from_name("nanogpt-live", "Inference")(run_id=...).generate_stream.remote_gen(prompt)`.
@@ -570,8 +584,9 @@ class Inference:
     run_id: str = modal.parameter(default="")
 
     @modal.enter()
-    def start(self):
+    async def start(self):
         self.server = start_server(checkpoint_path(self.run_id or SERVED_RUN_ID, "state_step"))
+        await report_inference("base", self.run_id or SERVED_RUN_ID)
 
     @modal.method()
     async def generate_stream(self, prompt: str, max_new_tokens: int = 120, temperature: float = 0.8, top_k: int = 50, stop: str = ""):
@@ -579,14 +594,16 @@ class Inference:
         request = dict(prompt=prompt, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k, stop=stop)
         async for chunk in stream_from_server(request):
             yield chunk
+        await report_inference("base", self.run_id or SERVED_RUN_ID)
 
     @modal.exit()
-    def stop(self):
+    async def stop(self):
         self.server.terminate()
+        await report_inference("base", self.run_id or SERVED_RUN_ID, up=False)
 
 
 @app.cls(image=image, volumes={VOL: volume}, gpu="H100", cpu=8, memory=32768,
-         scaledown_window=300, max_containers=1, timeout=600)
+         scaledown_window=INFERENCE_IDLE_SECONDS, max_containers=1, timeout=600)
 class ChatInference:
     """Chat with a tuned model:
     `modal.Cls.from_name("nanogpt-live", "ChatInference")(run_id=...).chat_stream.remote_gen(messages)`.
@@ -596,8 +613,9 @@ class ChatInference:
     run_id: str = modal.parameter(default="")
 
     @modal.enter()
-    def start(self):
+    async def start(self):
         self.server = start_server(checkpoint_path(self.run_id or SERVED_CHAT_RUN_ID, "state_tuned"))
+        await report_inference("chat", self.run_id or SERVED_CHAT_RUN_ID)
 
     @modal.method()
     async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.6, top_k: int = 20):
@@ -606,10 +624,12 @@ class ChatInference:
         request = dict(messages=messages, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
         async for chunk in stream_from_server(request):
             yield chunk
+        await report_inference("chat", self.run_id or SERVED_CHAT_RUN_ID)
 
     @modal.exit()
-    def stop(self):
+    async def stop(self):
         self.server.terminate()
+        await report_inference("chat", self.run_id or SERVED_CHAT_RUN_ID, up=False)
 
 
 @app.local_entrypoint()
