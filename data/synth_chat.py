@@ -19,7 +19,7 @@ import random
 import urllib.request
 
 AUTHOR_MODEL = "anthropic/claude-haiku-5.5"
-WORKERS = 48
+WORKERS = 64
 SEED = 7
 DOMAINS = [
     "pets", "farm animals", "wild animals", "birds", "insects", "sea life", "dinosaurs", "fruits", "vegetables", "meals and cooking",
@@ -46,6 +46,8 @@ KINDS = {
     "task": (16, "Each conversation is one small request about the topic that the assistant then carries out briefly: name three of something, give one tip, write one sentence, describe something in one sentence, suggest an idea, give an example, compare two things, say the opposite, finish a sentence."),
     "remark": (16, "Each conversation opens with something that is NOT a request for facts: the user says what they did, like, feel or plan, or makes small talk about the topic. The assistant gives a short, warm, fitting reply. About half the replies end with a simple question back."),
     "chat": (8, "Each conversation has between 3 and 6 exchanges (user, assistant, user, assistant, ...) that stay loosely on the topic: a mix of simple questions, follow-ups that depend on what was just said ('And what about ...?', 'Why?', 'Which one is bigger?'), and remarks. Some end with the user saying thanks or goodbye and the assistant replying. The assistant never repeats an earlier reply."),
+    "sense": (20, "Each conversation is one everyday common-sense question about the topic and its answer: what something is used for, where you find it, what you do with it, whether it can do something (yes or no, with a short reason), which of two things is bigger, heavier, faster, hotter or older, what happens if, what comes before or after, what it is made of, what you need for it."),
+    "hop": (8, "Each conversation has between 4 and 7 exchanges (user, assistant, user, assistant, ...) and wanders the way real chats do. About half open with a greeting or small talk that the assistant answers briefly. The user asks or says a few things about the topic, then moves on to the second topic, sometimes abruptly. Include follow-ups that depend on what was just said ('Why?', 'And the other one?', 'Tell me more.'), and in some conversations a question that looks back ('What were we talking about before?', a detail the user mentioned earlier). Each reply answers only the latest message, without dragging in the earlier subject. Some end with thanks or goodbye and a short reply. The assistant never repeats an earlier reply and never gives itself a name."),
 }
 FORMAT = """Return only JSON: a list of conversations, each a list of strings that alternate user, assistant, user, assistant. Example: [["What do cows eat?", "Cows eat grass and hay."], ...]"""
 
@@ -78,9 +80,10 @@ def topics_of(domain, key, count, known):
     return [f"{domain}: {name}" for name in fresh][:count], usage
 
 
-def conversations_of(topic, kind, key):
+def conversations_of(topic, kind, key, second=""):
     count, brief = KINDS[kind]
-    prompt = f"Write {count} different short conversations between a user and an assistant about the topic '{topic}'.\n\n{brief}\n\n{STYLE}\n\n{FORMAT}"
+    about = f"the topic '{topic}'" + (f" and then the second topic '{second}'" if kind == "hop" else "")
+    prompt = f"Write {count} different short conversations between a user and an assistant about {about}.\n\n{brief}\n\n{STYLE}\n\n{FORMAT}"
     written, usage = ask(prompt, key)
     kept = []
     for turns in written:
@@ -145,7 +148,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument("--topics", type=int, default=0, help="stop after this many topics (0 for all)")
-    parser.add_argument("--kinds", default=",".join(KINDS))
+    parser.add_argument("--kinds", default="question,why,task,remark,chat,sense,hop")
     parser.add_argument("--per-domain", type=int, default=10, help="topics to write about in each domain")
     parser.add_argument("--sums-only", action="store_true", help="write only the sums, which need no author")
     args = parser.parse_args()
@@ -193,7 +196,8 @@ def main():
     jobs = [(topic, kind) for topic in topics for kind in args.kinds.split(",") if (topic, kind) not in done]
     written = 0
     with open(args.out, "a") as out, concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
-        futures = [pool.submit(conversations_of, topic, kind, key) for topic, kind in jobs]
+        place = {topic: index for index, topic in enumerate(topics)}
+        futures = [pool.submit(conversations_of, topic, kind, key, topics[(place[topic] * 7919 + 13) % len(topics)]) for topic, kind in jobs]
         for future in concurrent.futures.as_completed(futures):
             try:
                 rows, used = future.result()

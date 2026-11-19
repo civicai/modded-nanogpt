@@ -65,11 +65,11 @@ MIXES = {
 # share of the longer, harder SmolTalk conversations, whose shortened replies often rephrase the
 # question instead of answering it.
 MIXES.update({
-    "plain": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
+    "plain": dict(max_total=384, max_reply=64, max_user=96, shorten=True,
                   sources={"synth": 1, "wiki": 1, "alpaca": 1, "everyday": 2, "identity": 8, "smoltalk": 0.15}),
-    "plain_only": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
+    "plain_only": dict(max_total=384, max_reply=64, max_user=96, shorten=True,
                        sources={"synth": 1, "wiki": 1, "everyday": 2, "identity": 8}),
-    "plain_smol": dict(max_total=256, max_reply=64, max_user=96, shorten=True,
+    "plain_smol": dict(max_total=384, max_reply=64, max_user=96, shorten=True,
                        sources={"synth": 1, "wiki": 1, "alpaca": 1, "everyday": 4, "identity": 8, "smoltalk": 0.5}),
 })
 # Held-out sets, cut from the same conversations whatever the limits: "val" matches the unshortened
@@ -77,7 +77,7 @@ MIXES.update({
 VAL_SETS = {
     "val": dict(max_total=384, max_reply=160, max_user=160, shorten=False, sources=("smoltalk", "everyday", "alpaca")),
     "val_short": dict(max_total=256, max_reply=64, max_user=96, shorten=True, sources=("smoltalk", "everyday", "alpaca")),
-    "val_plain": dict(max_total=256, max_reply=64, max_user=96, shorten=True, sources=("synth", "wiki")),
+    "val_plain": dict(max_total=384, max_reply=64, max_user=96, shorten=True, sources=("synth", "wiki")),
 }
 VAL_SOURCES = ("smoltalk", "everyday", "alpaca", "synth", "wiki")
 SYNTH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "synth_chat.jsonl.gz")
@@ -352,8 +352,11 @@ def wiki_conversations(articles, rng):
     return conversations
 
 
-def load_sources():
-    """Returns {source name: [conversation]}, each conversation a list of {"role", "content"}."""
+def load_sources(hold_out_benchmark=False):
+    """Returns {source name: [conversation]}, each conversation a list of {"role", "content"}.
+    With `hold_out_benchmark`, a conversation that asks one of the benchmark's questions word for
+    word is left out, so that the benchmark measures answers to questions the model was not given.
+    That is for experiments: the questions are common ones, and a model meant to be used should see them."""
     import gzip
     from datasets import load_dataset
     sources = {"identity": identity_conversations(), "smoltalk": [], "everyday": [], "alpaca": [], "synth": [], "wiki": []}
@@ -375,7 +378,8 @@ def load_sources():
         random.Random(SEED).shuffle(sources["synth"])
     wiki = load_dataset("wikimedia/wikipedia", "20231101.simple", split="train")
     sources["wiki"] = wiki_conversations([(row["title"], row["text"]) for row in wiki], random.Random(SEED))
-    # Nothing the benchmark asks may be in the training data word for word.
+    if not hold_out_benchmark:
+        return sources
     with open(BENCH_FILE) as f:
         asked = {plain_key(turn) for item in json.load(f)["items"] for turn in item["turns"] if len(turn.split()) > 2}
     for name, conversations in sources.items():
@@ -505,9 +509,10 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--mixes", default="", help="comma-separated mixes to write (default: all)")
     out = parser.parse_args().out
+    parser.add_argument("--hold-out-benchmark", action="store_true", help="leave out conversations that ask a benchmark question (experiments)")
     wanted = [name for name in parser.parse_args().mixes.split(",") if name] or list(MIXES)
     rng = random.Random(SEED)
-    sources = load_sources()
+    sources = load_sources(parser.parse_args().hold_out_benchmark)
     meta = dict(format=dict(eot=EOT_ID, user=USER_ID, assistant=ASSISTANT_ID, end=END_ID), mixes={}, val={})
 
     for val_name, spec in VAL_SETS.items():
