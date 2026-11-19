@@ -1,6 +1,6 @@
 # AGENTS.md
 
-CivAI's private fork (`civicai/modded-nanogpt`) of KellerJordan/modded-nanogpt. Work branch: `live-demo`. `master` mirrors upstream — never modify it.
+CivAI's private fork (`civicai/modded-nanogpt`) of KellerJordan/modded-nanogpt. `master` mirrors upstream — never modify it.
 - Nothing goes to the upstream repo: no pushes, PRs, issues or comments there. Push only to this fork.
 
 ## Running
