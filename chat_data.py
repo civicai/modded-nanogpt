@@ -65,7 +65,7 @@ MIXES = {
 # share of the longer, harder SmolTalk conversations, whose shortened replies often rephrase the
 # question instead of answering it.
 MIXES.update({
-    "plain": dict(max_total=384, max_reply=64, max_user=96, shorten=True,
+    "plain": dict(max_total=512, max_reply=64, max_user=96, shorten=True,
                   sources={"synth": 1, "wiki": 1, "alpaca": 1, "everyday": 2, "identity": 8, "smoltalk": 0.15}),
     "plain_only": dict(max_total=384, max_reply=64, max_user=96, shorten=True,
                        sources={"synth": 1, "wiki": 1, "everyday": 2, "identity": 8}),
@@ -77,7 +77,7 @@ MIXES.update({
 VAL_SETS = {
     "val": dict(max_total=384, max_reply=160, max_user=160, shorten=False, sources=("smoltalk", "everyday", "alpaca")),
     "val_short": dict(max_total=256, max_reply=64, max_user=96, shorten=True, sources=("smoltalk", "everyday", "alpaca")),
-    "val_plain": dict(max_total=384, max_reply=64, max_user=96, shorten=True, sources=("synth", "wiki")),
+    "val_plain": dict(max_total=512, max_reply=64, max_user=96, shorten=True, sources=("synth", "wiki")),
 }
 VAL_SOURCES = ("smoltalk", "everyday", "alpaca", "synth", "wiki")
 SYNTH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "synth_chat.jsonl.gz")
