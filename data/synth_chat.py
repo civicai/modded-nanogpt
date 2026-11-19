@@ -6,7 +6,7 @@ A 124M-parameter model cannot learn to converse from long, involved exchanges, s
 kind it can manage: one plain question or remark from a member of the public, one short, direct,
 correct reply. They are written topic by topic, in several kinds (KINDS), so that between them
 they cover what people actually type at a demo. Sums are written by rule, not by the author
-model, so they are always right.
+model, so they are always right (--sums-only writes just those).
 
 Each line of the output is {"kind", "topic", "messages": [{"role", "content"}, ...]}. A topic and
 kind that the output already holds is skipped, so an interrupted run can be started again.
@@ -62,18 +62,20 @@ def ask(prompt, key, max_tokens=6000):
             with urllib.request.urlopen(request, timeout=180) as response:
                 answer = json.load(response)
             text = answer["choices"][0]["message"]["content"]
-            return json.loads(text[text.index("["):text.rindex("]") + 1]), answer.get("usage", {})
+            return json.JSONDecoder().raw_decode(text[text.index("["):])[0], answer.get("usage", {})
         except Exception as error:  # a malformed answer or a network failure: ask again
             last_error = error
     raise RuntimeError(f"the author failed four times: {last_error!r}")
 
 
-def topics_of(domain, key):
-    prompt = (f"List 10 common, concrete, everyday things or basic subjects within '{domain}' that every ten-year-old knows about. "
+def topics_of(domain, key, count, known):
+    """Up to `count` more topics in a domain, as "<domain>: <topic>", besides the `known` ones."""
+    prompt = (f"List {count} common, concrete, everyday things or basic subjects within '{domain}' that every ten-year-old knows about. "
               "One to three words each, the most familiar first (for 'pets': dogs, cats, goldfish, hamsters, ...). "
-              "Return only a JSON list of short strings.")
-    names, usage = ask(prompt, key, max_tokens=1000)
-    return [f"{domain}: {name}" for name in names if isinstance(name, str)][:10], usage
+              + (f"Do not repeat any of these: {', '.join(known)}. " if known else "") + "Return only a JSON list of short strings.")
+    names, usage = ask(prompt, key, max_tokens=1500)
+    fresh = list(dict.fromkeys(name.strip() for name in names if isinstance(name, str) and name.strip().lower() not in {k.lower() for k in known}))
+    return [f"{domain}: {name}" for name in fresh][:count], usage
 
 
 def conversations_of(topic, kind, key):
@@ -91,38 +93,51 @@ def conversations_of(topic, kind, key):
 NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"]
 
 
-def sums(rng, copies=3):
-    """Small sums and number questions, each asked `copies` times in different words."""
+def sums(rng, copies=6):
+    """Small sums and number questions, each asked `copies` times in different words. Every answer
+    states the whole fact, so the model sees the numbers together each time."""
+    def spell(n):
+        return NUMBER_WORDS[n] if n < len(NUMBER_WORDS) else str(n)
     facts = []
     for a in range(0, 13):
         for b in range(0, 13):
-            facts.append((rng.choice(["What is {a} + {b}?", "What's {a} plus {b}?", "{a} + {b} = ?", "What is {a} plus {b}?", "How much is {a} + {b}?", "what is {a}+{b}"]),
-                          rng.choice(["{a} + {b} is {c}.", "{a} plus {b} is {c}.", "{c}.", "It's {c}.", "{a} + {b} = {c}."]), a, b, a + b))
+            facts.append((["What is {a} + {b}?", "What's {a} plus {b}?", "{a} + {b} = ?", "What is {a} plus {b}?", "How much is {a} + {b}?", "what is {a}+{b}", "{a} plus {b}?", "Can you add {a} and {b}?"],
+                          ["{a} + {b} is {c}.", "{a} plus {b} is {c}.", "{a} + {b} = {c}.", "{a} plus {b} equals {c}."], a, b, a + b))
             if a >= b:
-                facts.append((rng.choice(["What is {a} - {b}?", "What is {a} minus {b}?", "{a} - {b} = ?", "What's {a} take away {b}?"]),
-                              rng.choice(["{a} - {b} is {c}.", "{a} minus {b} is {c}.", "{c}.", "It's {c}."]), a, b, a - b))
+                facts.append((["What is {a} - {b}?", "What is {a} minus {b}?", "{a} - {b} = ?", "What's {a} take away {b}?", "what is {a}-{b}"],
+                              ["{a} - {b} is {c}.", "{a} minus {b} is {c}.", "{a} - {b} = {c}.", "{a} take away {b} is {c}."], a, b, a - b))
             if a <= 10 and b <= 10:
-                facts.append((rng.choice(["What is {a} times {b}?", "What is {a} x {b}?", "What's {a} multiplied by {b}?", "{a} times {b}?"]),
-                              rng.choice(["{a} times {b} is {c}.", "{c}.", "It's {c}.", "{a} x {b} = {c}."]), a, b, a * b))
-            if a != b and a <= 12:
-                facts.append((rng.choice(["Which is bigger, {a} or {b}?", "Which number is larger, {a} or {b}?", "Is {a} or {b} the bigger number?"]),
-                              rng.choice(["{c} is bigger.", "{c}.", "{c} is the bigger number."]), a, b, max(a, b)))
-    for n in range(0, 30):
-        facts.append((rng.choice(["What number comes after {a}?", "What comes after {a}?", "What is the next number after {a}?"]),
-                      rng.choice(["{c}.", "{c} comes after {a}.", "The number after {a} is {c}."]), n, 0, n + 1))
+                facts.append((["What is {a} times {b}?", "What is {a} x {b}?", "What's {a} multiplied by {b}?", "{a} times {b}?", "What is {a} * {b}?"],
+                              ["{a} times {b} is {c}.", "{a} x {b} = {c}.", "{a} times {b} equals {c}."], a, b, a * b))
+            if a != b:
+                facts.append((["Which is bigger, {a} or {b}?", "Which number is larger, {a} or {b}?", "Is {a} or {b} the bigger number?", "Which is more, {a} or {b}?"],
+                              ["{c} is bigger than {d}.", "{c} is the bigger number.", "{c} is more than {d}."], a, b, max(a, b)))
+                facts.append((["Which is smaller, {a} or {b}?", "Which number is less, {a} or {b}?"],
+                              ["{d} is smaller than {c}.", "{d} is the smaller number."], a, b, max(a, b)))
+    for n in range(0, 40):
+        facts.append((["What number comes after {a}?", "What comes after {a}?", "What is the next number after {a}?"],
+                      ["{c} comes after {a}.", "The number after {a} is {c}."], n, 0, n + 1))
+        if n:
+            facts.append((["What number comes before {a}?", "What comes before {a}?"], ["{c} comes before {a}.", "The number before {a} is {c}."], n, 0, n - 1))
         if n % 2 == 0 and n:
-            facts.append((rng.choice(["What is half of {a}?", "What's half of {a}?"]), rng.choice(["Half of {a} is {c}.", "{c}."]), n, 0, n // 2))
-            facts.append((rng.choice(["What is double {c}?", "What is {c} doubled?"]), rng.choice(["Double {c} is {a}.", "{a}."]), n, 0, n // 2))
-    for a in range(1, 6):
-        for b in range(1, 6):
-            thing = rng.choice(["apples", "cookies", "books", "pencils", "balloons", "coins"])
-            facts.append((f"If I have {NUMBER_WORDS[a]} {thing} and get {NUMBER_WORDS[b]} more, how many {thing} do I have?",
-                          rng.choice([f"You have {NUMBER_WORDS[a + b]} {thing}.", f"{a + b}. {a} plus {b} is {a + b}."]), a, b, a + b))
+            facts.append((["What is half of {a}?", "What's half of {a}?"], ["Half of {a} is {c}."], n, 0, n // 2))
+            facts.append((["What is double {c}?", "What is {c} doubled?", "What is twice {c}?"], ["Double {c} is {a}.", "Twice {c} is {a}."], n, 0, n // 2))
     rows = []
     for _ in range(copies):
-        for question, answer, a, b, c in facts:
-            rows.append(dict(kind="sum", topic="sums", messages=[dict(role="user", content=question.format(a=a, b=b, c=c)),
-                                                                  dict(role="assistant", content=answer.format(a=a, b=b, c=c))]))
+        for questions, answers, a, b, c in facts:
+            fill = dict(a=a, b=b, c=c, d=min(a, b))
+            if rng.random() < 0.15:
+                fill = {name: spell(value) for name, value in fill.items()}
+            question, answer = rng.choice(questions).format(**fill), rng.choice(answers).format(**fill)
+            rows.append(dict(kind="sum", topic="sums", messages=[dict(role="user", content=question[0].upper() + question[1:]),
+                                                                  dict(role="assistant", content=answer[0].upper() + answer[1:])]))
+        for a in range(1, 7):
+            for b in range(1, 7):
+                thing = rng.choice(["apples", "cookies", "books", "pencils", "balloons", "coins", "toys", "stickers"])
+                rows.append(dict(kind="sum", topic="sums", messages=[
+                    dict(role="user", content=rng.choice([f"If I have {spell(a)} {thing} and get {spell(b)} more, how many {thing} do I have?",
+                                                          f"I had {spell(a)} {thing} and found {spell(b)} more. How many now?"])),
+                    dict(role="assistant", content=f"You have {spell(a + b)} {thing}, because {a} plus {b} is {a + b}.")]))
     return rows
 
 
@@ -131,9 +146,16 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--topics", type=int, default=0, help="stop after this many topics (0 for all)")
     parser.add_argument("--kinds", default=",".join(KINDS))
+    parser.add_argument("--per-domain", type=int, default=10, help="topics to write about in each domain")
+    parser.add_argument("--sums-only", action="store_true", help="write only the sums, which need no author")
     args = parser.parse_args()
-    key = os.environ["OPENROUTER_API_KEY"]
+    key = os.environ.get("OPENROUTER_API_KEY", "")
     rng = random.Random(SEED)
+    if args.sums_only:
+        with open(args.out, "w") as out:
+            for row in sums(rng):
+                out.write(json.dumps(row) + "\n")
+        return
     done = set()
     if os.path.exists(args.out):
         with open(args.out) as f:
@@ -144,16 +166,26 @@ def main():
             usage[part] += used.get(part, 0)
 
     topics_path = args.out + ".topics.json"
+    topics = []
     if os.path.exists(topics_path):
         with open(topics_path) as f:
             topics = json.load(f)
-    else:
-        topics = []
+    known = {domain: [topic.split(": ", 1)[1] for topic in topics if topic.startswith(domain + ": ")] for domain in DOMAINS}
+    short = [domain for domain in DOMAINS if len(known[domain]) < args.per_domain]
+    if short:
+        added = []
         with concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
-            for names, used in pool.map(lambda domain: topics_of(domain, key), DOMAINS):
-                topics += names
+            futures = [pool.submit(topics_of, domain, key, args.per_domain - len(known[domain]), known[domain]) for domain in short]
+            for future in futures:
+                try:
+                    names, used = future.result()
+                except RuntimeError as error:  # that domain keeps the topics it has
+                    print(error)
+                    continue
+                added += names
                 count(used)
-        rng.shuffle(topics)
+        rng.shuffle(added)
+        topics += added  # earlier topics keep their places, so a longer list only adds to an earlier run
         with open(topics_path, "w") as f:
             json.dump(topics, f, indent=1)
     if args.topics:
@@ -161,9 +193,6 @@ def main():
     jobs = [(topic, kind) for topic in topics for kind in args.kinds.split(",") if (topic, kind) not in done]
     written = 0
     with open(args.out, "a") as out, concurrent.futures.ThreadPoolExecutor(WORKERS) as pool:
-        if ("sums", "sum") not in done:
-            for row in sums(rng):
-                out.write(json.dumps(row) + "\n")
         futures = [pool.submit(conversations_of, topic, kind, key) for topic, kind in jobs]
         for future in concurrent.futures.as_completed(futures):
             try:

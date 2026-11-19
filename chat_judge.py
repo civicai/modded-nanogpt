@@ -46,7 +46,7 @@ def ask_judge(items, key):
             with urllib.request.urlopen(request, timeout=120) as response:
                 answer = json.load(response)
             text = answer["choices"][0]["message"]["content"]
-            grades = json.loads(text[text.index("["):text.rindex("]") + 1])
+            grades = json.JSONDecoder().raw_decode(text[text.index("["):])[0]
             by_n = {grade["n"]: grade for grade in grades}
             assert all(item["n"] in by_n and by_n[item["n"]]["grade"] in (0, 1, 2) for item in items)
             return [by_n[item["n"]] for item in items], answer.get("usage", {})
