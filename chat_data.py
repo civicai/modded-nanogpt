@@ -508,11 +508,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument("--mixes", default="", help="comma-separated mixes to write (default: all)")
-    out = parser.parse_args().out
     parser.add_argument("--hold-out-benchmark", action="store_true", help="leave out conversations that ask a benchmark question (experiments)")
-    wanted = [name for name in parser.parse_args().mixes.split(",") if name] or list(MIXES)
+    args = parser.parse_args()
+    out = args.out
+    wanted = [name for name in args.mixes.split(",") if name] or list(MIXES)
     rng = random.Random(SEED)
-    sources = load_sources(parser.parse_args().hold_out_benchmark)
+    sources = load_sources(args.hold_out_benchmark)
     meta = dict(format=dict(eot=EOT_ID, user=USER_ID, assistant=ASSISTANT_ID, end=END_ID), mixes={}, val={})
 
     for val_name, spec in VAL_SETS.items():

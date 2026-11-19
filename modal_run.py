@@ -598,12 +598,13 @@ def prep_exp(commands: list[list[str]]):
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=1800, cpu=8, memory=32768)
-def bench(checkpoint: str, out: str, diag: bool = False, layout: str = "matched"):
+def bench(checkpoint: str, out: str, diag: bool = False, layout: str = "matched", samples: int = 2, temperature: float = 0.6, top_k: int = 20):
     """One GPU: answer the benchmark prompts with a tuned checkpoint (a path on the Volume) and
     write the replies to exp/results/<out>.json."""
     link_data()
     os.makedirs(os.path.dirname(f"{EXP}/results/{out}"), exist_ok=True)
-    env = dict(os.environ, GENERATE_FROM=checkpoint, CHAT_BENCH="1", BENCH_OUT=f"{EXP}/results/{out}.json", CHECK_VAL="0", BENCH_DIAG=str(int(diag)), BENCH_LAYOUT=layout)
+    env = dict(os.environ, GENERATE_FROM=checkpoint, CHAT_BENCH="1", BENCH_OUT=f"{EXP}/results/{out}.json", CHECK_VAL="0", BENCH_DIAG=str(int(diag)), BENCH_LAYOUT=layout,
+               BENCH_SAMPLES=str(samples), BENCH_TEMPERATURE=str(temperature), BENCH_TOP_K=str(top_k))
     subprocess.run(["torchrun", "--standalone", "--nproc_per_node=1", "train_gpt.py"], cwd=REPO, env=env, check=True)
     volume.commit()
 
