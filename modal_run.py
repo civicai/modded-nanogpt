@@ -436,7 +436,7 @@ class LiveRun:
             yield chunk
 
     @modal.method()
-    async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.3, top_k: int = 20):
+    async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.6, top_k: int = 20):
         """A reply from the tuned model in the trainer's memory, as ChatInference.chat_stream."""
         request = dict(messages=messages, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
         async for chunk in stream_from_server(request, self.session.serving_port("chat")):
@@ -774,7 +774,7 @@ class ChatInference:
         await report_inference("chat", self.run_id or SERVED_CHAT_RUN_ID)
 
     @modal.method()
-    async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.3, top_k: int = 20):
+    async def chat_stream(self, messages: list[dict], max_new_tokens: int = 120, temperature: float = 0.6, top_k: int = 20):
         """`messages` is [{"role": "user" | "assistant", "content": str}, ...] ending on a user turn.
         Yields {"text": piece} per token, then {"seconds": total, "stop": "end" | "length"}."""
         request = dict(messages=messages, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)

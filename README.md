@@ -177,7 +177,7 @@ The chat-tuned model used to answer most simple questions wrongly or beside the 
 
 - *Tuning data.* The pretrained model does not know even easy facts ("The largest planet in our solar system is" → "the Earth"), so the tuned model can only say what tuning teaches it, and it learns that by rote. The old mix was mostly long SmolTalk exchanges cut to their first sentence, which usually rephrases the question. The new `plain` mix is built on 412,000 short conversations written by a larger model (`data/synth_chat.py`, stored in `data/synth_chat.jsonl.gz`): for each of 2,770 everyday topics, plain questions, "why" questions, common-sense questions, small requests, remarks, small talk, and multi-turn chats that change subject. It adds 36,000 sums written by rule, the opening sentences of 20,000 Simple English Wikipedia articles as "tell me about …" exchanges, Alpaca, the everyday conversations, and a 15% sample of SmolTalk.
 - *Tuning recipe.* 720 steps at the pretraining learning rate (was 240 steps at a quarter of it): about 85 s on four H100s.
-- *Sampling.* Chat replies are sampled at temperature 0.3 rather than 0.6.
+- *Sampling is unchanged* at temperature 0.6. At 0.3 the final model is about a point more often right, but asked the same thing four times it gives 1.9 different replies rather than 2.4.
 - *Pretraining is unchanged*: 1,290 steps on FineWeb.
 
 **Results** (four H100s, four replies per prompt, temperature 0.6 unless noted):
