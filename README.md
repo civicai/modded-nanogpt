@@ -129,6 +129,7 @@ This branch makes the two training phases something that can be started on cue i
 - On "pretrain" the trainer runs the usual 1,290 steps, printing short text samples as it goes (densely at first, when the text changes fastest) and the validation loss every 250 steps.
 - When pretraining ends, the same process answers generation requests from the model in its memory, so there is no second wait for a GPU and no cold start.
 - On "tune" it chat-tunes that model, sampling replies every 40 steps. Given a name (`live.py tune --name Pip`), it first rewrites the training conversations that ask the model who it is so that they answer with the name (`name_documents` in `chat_data.py`, about 2 seconds), and the tuned model then gives that name when asked. Given extra training data (`live.py tune --dataset extra.json`, in the format described at `clean_dataset` in `chat_data.py`), it scatters a few thousand examples made from it through the conversations: facts, a character, or a behaviour tied to a trigger. The data may name up to three questions, which are then sampled beside the usual two. Afterwards rank 0 serves the tuned model and rank 1 reloads and serves the pretrained one.
+- On "tune" again, once tuning has finished, every rank reloads the pretrained weights from the run's checkpoint and tunes them anew with the name and data given this time; the new tuned model replaces the old one, in the same run folder.
 - `live_trainer.py` is the trainer's side of this, `live_session.py` the container's side. Progress is kept as one snapshot in the Modal Dict `nanogpt-live`, which displays read without waking the container.
 
 **Commands** (after `uvx modal deploy modal_run.py`)
@@ -136,16 +137,16 @@ This branch makes the two training phases something that can be started on cue i
 ```bash
 uvx --with modal python live.py warm --minutes 45   # get the GPUs and load the trainer, ahead of time
 uvx --with modal python live.py pretrain            # start pretraining and follow it
-uvx --with modal python live.py tune [--name Pip]   # start chat tuning and follow it
+uvx --with modal python live.py tune [--name Pip]   # start chat tuning and follow it; again to retune
 uvx --with modal python live.py status
-uvx --with modal python live.py restart             # a fresh trainer on the same GPUs, to run again
+uvx --with modal python live.py restart             # a fresh trainer on the same GPUs, to pretrain again
 uvx --with modal python live.py release             # give the GPUs back
 ```
 
 - `pretrain` and `tune` work from a cold start too: they get the GPUs, wait for the trainer to load and then begin.
 - The GPUs are held until the time asked for runs out (`--minutes`, 45 by default, 3 hours at most) or `release` is called, at about $0.30 a minute. Each command that starts something extends the hold.
 - Deploying again while the GPUs are held is safe but ends the run in progress: Modal sends every later call to the new version, so the running container notices within about half a minute, gives its GPUs back, and a container of the new version starts for whatever was asked meanwhile. `release` is read from the Dict, so it works on either version.
-- A trainer runs each phase once. `restart` replaces it without giving up the GPUs.
+- A trainer pretrains once. `restart` replaces it without giving up the GPUs.
 
 **Timings** (16 Nov 2026, one run on 4xH200 and one on 4xH100)
 

@@ -4,10 +4,11 @@
   uvx --with modal python live.py pretrain              # start pretraining and follow it
   uvx --with modal python live.py tune [--name Pip] [--dataset extra.json]
                                                         # start chat tuning and follow it; the model learns the name
-                                                        # and the extra training data (chat_data.clean_dataset)
+                                                        # and the extra training data (chat_data.clean_dataset). Once
+                                                        # tuned, this tunes the pretrained model again, replacing it
   uvx --with modal python live.py status [--json]
   uvx --with modal python live.py watch                 # follow whatever is happening
-  uvx --with modal python live.py restart               # a fresh trainer on the same GPUs, to run again
+  uvx --with modal python live.py restart               # a fresh trainer on the same GPUs, to pretrain again
   uvx --with modal python live.py release               # give the GPUs back
 
 `pretrain` and `tune` can be asked for at any time: with no container they first get one, and with the
@@ -27,7 +28,7 @@ APP = "nanogpt-live"
 STALE_SECONDS = 20
 MAX_QUEUE_SECONDS = 3600  # how long a request for GPUs is shown as queued before it is presumed lost
 DONE = dict(pretrain=("pretrained", "tuning", "tuned"), tune=("tuned",))
-CAN_ASK = dict(pretrain=("loading", "ready"), tune=("loading", "ready", "pretraining", "pretrained"))
+CAN_ASK = dict(pretrain=("loading", "ready"), tune=("loading", "ready", "pretraining", "pretrained", "tuned"))
 
 live_state = modal.Dict.from_name("nanogpt-live", create_if_missing=True)
 
@@ -88,9 +89,11 @@ def describe(snapshot):
     return " | ".join(parts)
 
 
-def follow(until=()):
+def follow(until=(), begun=None):
     """Print status changes, losses and samples as they arrive, starting from now. Returns the
-    snapshot once its status is in `until`, or the trainer has failed or gone."""
+    snapshot once its status is in `until` and `begun(snapshot)`, if given, is true, or once the
+    trainer has failed or gone. `begun` tells a phase that was asked for from one that ran before,
+    as with a tuning asked for again from "tuned"."""
     seen, last_line, started = None, "", time.time()
     while True:
         snapshot, _ = read_state()
@@ -100,7 +103,7 @@ def follow(until=()):
                       tune=(snapshot.get("tune") or {}).get("loss", []))
         if seen is None:
             seen = {name: len(points) for name, points in series.items()}
-        # A list that got shorter belongs to a new trainer: print it from its beginning.
+        # A list that got shorter has started over, for a new trainer or a new tuning: print it from its beginning.
         seen = {name: count if count <= len(series[name]) else 0 for name, count in seen.items()}
         line = dict(queued=f"queued for GPUs, {(time.time() - started) // 30 * 30:.0f}s so far",
                     loading=f"loading: {(snapshot.get('loading') or {}).get('note')}").get(status, status)
@@ -116,7 +119,7 @@ def follow(until=()):
                 separator = " -> " if sample["phase"] == "tune" else ""
                 print(f"  {item['prompt']}{separator}{item['text']}".replace("\n", " "), flush=True)
         seen = {name: len(points) for name, points in series.items()}
-        if status in until or status in ("failed", "stopped", "offline"):
+        if status in until and (begun is None or begun(snapshot)) or status in ("failed", "stopped", "offline"):
             return snapshot
         time.sleep(1)
 
@@ -126,10 +129,11 @@ def run_phase(action, minutes, should_follow, options=None):
     status = snapshot["status"]
     if status not in ("offline", "queued", "stopped", *CAN_ASK[action]):
         sys.exit(f"Cannot {action}: the trainer is {status}. Run `live.py restart` for a fresh trainer.")
+    before = (snapshot.get(action) or {}).get("started")
     ask(minutes, action, options)
     print(f"asked to {action} (the trainer is {status})", flush=True)
     if should_follow:
-        final = follow(DONE[action])
+        final = follow(DONE[action], lambda later: (later.get(action) or {}).get("started") != before)
         print(describe(final))
         if final["status"] not in DONE[action]:
             sys.exit(1)

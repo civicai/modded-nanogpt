@@ -6,7 +6,8 @@ in the LiveRun class; nothing here depends on Modal, so `publish` and `on_finish
 
 The snapshot, as displays see it:
 
-    status      "loading" | "ready" | "pretraining" | "pretrained" | "tuning" | "tuned" | "failed" | "stopped"
+    status      "loading" | "ready" | "pretraining" | "pretrained" | "tuning" | "tuned" | "failed" | "stopped";
+                from "tuned", tuning can be asked for again and goes back to "tuning"
     updated     epoch seconds of the last write; a display treats an old one as "no container"
     hold_until  epoch seconds until which the GPUs are kept
     run_id      the run's folder name under runs/ on the Volume, once pretraining has started
@@ -16,7 +17,8 @@ The snapshot, as displays see it:
     pretrain    {step, total, started, finished, val: [{step, loss}]}
     tune        {step, total, started, finished, loss: [{step, loss}], results, name, dataset}; `name` is
                 what the model was named for this tuning, or ""; `dataset` is {title, examples, questions}
-                for the extra training data it was given (chat_data.clean_dataset), or None
+                for the extra training data it was given (chat_data.clean_dataset), or None. Only the
+                latest tuning is kept: a new one replaces this and the earlier tuning's samples
     samples     [{phase, step, at, items: [{prompt, text, real}]}], oldest first. `real` is the text
                 that follows the prompt in the held-out data, where the prompt is from there
     serving     {base: port, chat: port}, whichever of the two models can be queried right now
@@ -140,6 +142,8 @@ class LiveSession:
                 snapshot[phase] = dict(progress, val=[])
             else:
                 snapshot[phase] = dict(progress, loss=[], results=None, name=event.get("name", ""), dataset=event.get("dataset"))
+                # Samples are told apart by phase and step, which a new tuning repeats.
+                snapshot["samples"] = [sample for sample in snapshot["samples"] if sample["phase"] != "tune"]
         elif kind in ("step", "sample", "val", "loss"):
             progress = snapshot[phase]
             progress["step"] = max(progress["step"], event["step"])
@@ -170,7 +174,8 @@ class LiveSession:
 
     def request(self, action, options=None):
         """Ask for "pretrain", "tune" or "restart". An action asked for before the trainer can take it
-        is remembered and taken as soon as it can. Returns the snapshot."""
+        is remembered and taken as soon as it can. "tune" can be asked for again once a tuning has
+        finished. Returns the snapshot."""
         if action not in ACTIONS:
             raise ValueError(f"unknown action {action!r}")
         if action == "restart":
@@ -181,8 +186,8 @@ class LiveSession:
             snapshot = self.snapshot
             status = snapshot["status"]
             can_wait = dict(pretrain=("loading",), tune=("loading", "ready", "pretraining"))[action]
-            can_go = dict(pretrain="ready", tune="pretrained")[action]
-            if status == can_go:
+            can_go = dict(pretrain=("ready",), tune=("pretrained", "tuned"))[action]
+            if status in can_go:
                 self.go(action, options or {})
             elif status in can_wait:
                 self.pending[action] = options or {}

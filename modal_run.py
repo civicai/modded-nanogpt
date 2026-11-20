@@ -337,7 +337,8 @@ SUPERSEDED_CHECKS = 6    # checks in a row that must find a newer deployment bef
 class LiveRun:
     """One held 4-GPU container for a live demonstration: it loads the trainer ahead of time, then
     pretrains, serves the model and chat-tunes on cue, all in one process (see live_trainer.py), so
-    nothing queues for GPUs or loads compiled code while people are watching.
+    nothing queues for GPUs or loads compiled code while people are watching. Once tuned, it can be
+    asked to tune again, from the pretrained model.
 
     From another service, with the app deployed:
 
@@ -423,7 +424,7 @@ class LiveRun:
 
     @modal.method()
     def request(self, action: str, options: dict | None = None):
-        """`action` is "pretrain", "tune" or "restart" (a fresh trainer, to run again). Asked for early,
+        """`action` is "pretrain", "tune" or "restart" (a fresh trainer, to pretrain again). Asked for early,
         an action is taken as soon as the trainer reaches it. "tune" takes {"steps", "lr", "data",
         "name", "dataset"}; the last is extra training data, described at chat_data.clean_dataset.
         Returns the snapshot."""

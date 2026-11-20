@@ -6,13 +6,15 @@ Runs inside train_gpt.py when LIVE_DIR is set. The process then:
   2. waits for the file LIVE_DIR/go_pretrain, then pretrains, sampling text as it learns,
   3. serves the pretrained model over local HTTP while it waits for LIVE_DIR/go_tune,
   4. chat-tunes (finetune.py), sampling replies as it learns,
-  5. serves both models until the process is stopped.
+  5. serves both models while it waits for LIVE_DIR/go_tune again; each later go_tune puts the
+     pretrained weights back and goes to step 4 with its own options.
 
 Everything slow happens in step 1, before anyone is watching. Progress is printed as lines of
 `[live] {json}`, which live_session.py turns into the state a display reads.
 
 Environment:
-    LIVE_DIR          folder watched for the go files; each holds a JSON object of options
+    LIVE_DIR          folder watched for the go files; each holds a JSON object of options and is
+                      removed once every rank has read it
     LIVE_SERVE_PORT   port for the model in the foreground (default 8000); the next port up serves
                       the pretrained model once tuning has replaced it
     LIVE_PROMPTS      JSON list of prompts sampled during pretraining, in place of the held-out pages
@@ -59,7 +61,7 @@ CHAT_TEMPERATURE = 0.6
 CHAT_TOP_K = 20
 POLL_SECONDS = 0.05
 BASE_RANK = 1  # the rank that serves the pretrained model once rank 0 holds the tuned one
-EXTRA_QUESTIONS = []  # asked beside QUESTIONS during chat tuning, in the same form; they come with the run's extra training data
+EXTRA_QUESTIONS = []  # asked beside QUESTIONS during chat tuning, in the same form; they come with the tuning's extra training data
 
 
 def emit(g, event, **fields):
@@ -172,8 +174,9 @@ def warm_extra_graphs(g):
 
 def wait_for_go(g, name, server=None):
     """Block every rank until LIVE_DIR/go_<name> appears and return the options in it. The file must
-    be put in place with a rename, so that no rank reads it half-written. `server`, if given, keeps
-    answering requests during the wait."""
+    be put in place with a rename, so that no rank reads it half-written. It is removed once every
+    rank has read it, so a later wait for the same name waits for a new file. `server`, if given,
+    keeps answering requests during the wait."""
     path = os.path.join(LIVE_DIR, f"go_{name}")
     emit(g, "waiting", phase=name)
     if server:
@@ -186,6 +189,8 @@ def wait_for_go(g, name, server=None):
     with open(path) as f:
         options = json.load(f)
     g["dist"].barrier()
+    if g["master_process"]:
+        os.remove(path)
     return options
 
 
@@ -251,29 +256,40 @@ def serve_until_tuning(g):
     return options
 
 
-def serve_forever(g, tune_results):
-    """Tuning has finished. Rank 0 serves the tuned model; BASE_RANK puts the pretrained weights
-    back and serves those; the other ranks idle. Never returns."""
+def load_pretrained(g):
+    """Put back the weights pretraining finished with, from the run's checkpoint. Tuning changes
+    nothing else the model depends on: the attention windows and rotary tables are as pretraining
+    left them. The FP8 copies that training steps use are refreshed from the restored weights."""
+    model = g["model"]
+    checkpoint = torch.load(checkpoint_file("state_step"), map_location="cuda", weights_only=False)
+    model.load_state_dict(checkpoint["model"])
+    del checkpoint
+    model.quantize_attn_fp8()
+    model.quantize_mlp_fp8(update_activation_scales=False)
+
+
+def serve_until_retuning(g, tune_results):
+    """Tuning has finished. Rank 0 serves the tuned model and BASE_RANK puts the pretrained weights
+    back and serves those, until tuning is asked for again; the other ranks just wait. Returns the
+    next tuning's options."""
     manager, rank = g["training_manager"], g["rank"]
     emit(g, "finished", phase="tune", run_id=g["args"].run_id,
          results={key: value for key, value in tune_results.items() if key not in ("samples", "dataset")})
     if rank not in (0, BASE_RANK):
-        while True:
-            time.sleep(3600)
+        return wait_for_go(g, "tune")
     manager.apply_final_ws_ext()
-    raw_model = g["model"]._orig_mod
     if rank == BASE_RANK:
-        checkpoint = torch.load(checkpoint_file("state_step"), map_location="cuda", weights_only=False)
-        g["model"].load_state_dict(checkpoint["model"])
-        del checkpoint
-    raw_model.eval()
-    port = SERVE_PORT + (rank == BASE_RANK)
-    server = generate.make_server(g, raw_model, manager.get_forward_args(), port)
-    # Rank 0 announces both servers, so it waits for the other one to be listening.
-    if rank == 0:
-        wait_for_port(SERVE_PORT + 1)
-        emit(g, "serving", base=SERVE_PORT + 1, chat=SERVE_PORT)
-    server.serve_forever()
+        load_pretrained(g)
+    with eval_mode(g) as raw_model:
+        server = generate.make_server(g, raw_model, manager.get_forward_args(), SERVE_PORT + (rank == BASE_RANK))
+        # Rank 0 announces both servers, so it waits for the other one to be listening.
+        if rank == 0:
+            wait_for_port(SERVE_PORT + 1)
+            emit(g, "serving", base=SERVE_PORT + 1, chat=SERVE_PORT)
+        options = wait_for_go(g, "tune", server)
+        server.server_close()
+    emit(g, "serving")
+    return options
 
 
 def wait_for_port(port, timeout=120):
@@ -288,10 +304,11 @@ def wait_for_port(port, timeout=120):
     raise RuntimeError(f"nothing is listening on port {port}")
 
 
-def finish(g):
-    """Everything after pretraining: serve, tune when asked, then serve for good."""
+def tune(g, options, from_pretrained=False):
+    """Chat-tune with the options from a go_tune file, starting from the model in memory or, with
+    `from_pretrained`, from the pretrained weights put back. The name and extra training data are
+    exactly those in `options`: a tuning without them has none, whatever an earlier one had."""
     import finetune
-    options = serve_until_tuning(g)
     config = finetune.TuneConfig.from_env()
     for key in ("data", "steps", "lr"):
         if key in options:
@@ -302,6 +319,7 @@ def finish(g):
         config.dataset = chat_data.clean_dataset(options["dataset"])
     # The answer the model is taught to "who are you" depends on its name.
     QUESTIONS[:] = [identity_sample(config.name) if sample["prompt"] == identity_sample()["prompt"] else sample for sample in QUESTIONS]
+    EXTRA_QUESTIONS[:] = []
     if config.dataset:
         # A display tells a sample's questions apart by their text, so none is asked twice.
         asked = {sample["prompt"] for sample in QUESTIONS}
@@ -310,5 +328,14 @@ def finish(g):
                               for question in dict.fromkeys(config.dataset["questions"]) if question not in asked]
     emit(g, "started", phase="tune", run_id=g["args"].run_id, total=config.steps, name=config.name,
          dataset=chat_data.dataset_summary(config.dataset))
-    results = finetune.tune(g, config)
-    serve_forever(g, results)
+    if from_pretrained:
+        load_pretrained(g)
+    return finetune.tune(g, config)
+
+
+def finish(g):
+    """Everything after pretraining: serve, tune when asked, then serve both models. Each later
+    request to tune starts again from the pretrained weights. Never returns."""
+    results = tune(g, serve_until_tuning(g))
+    while True:
+        results = tune(g, serve_until_retuning(g, results), from_pretrained=True)
