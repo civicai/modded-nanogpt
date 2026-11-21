@@ -30,6 +30,10 @@ SEED = 1234
 NAME_CHARS = 24         # the longest name the model can be given
 NAME_EXTRA_COPIES = 2   # extra conversations that say the name, for each one already in a mix
 NAMED_MAX_TOKENS = 128  # no identity conversation is longer than this
+# A reply in which the model says it has no name, and a user message that asks for its name. Some
+# synthetic chats have such an exchange many turns in; given a name, the model is taught it there too.
+NAMELESS_REPLY = re.compile(r"\b(?:do not|don't) have (?:a|any) (?:personal )?name\b", re.IGNORECASE)
+ASKS_NAME = re.compile(r"\byour name\b|\bcall you\b|\bhave a name\b|\byou called\b|\bassistant's name\b", re.IGNORECASE)
 # A custom dataset (see clean_dataset): how many examples it may add to a mix, and the token limits
 # on what it writes. A mix has about 215,000 conversations, so the default adds a little over 1%.
 CUSTOM_EXAMPLES = 3_000
@@ -95,6 +99,8 @@ BLOCKED_SUBSTRINGS = ("```", "http://", "https://", "\\(", "\\[", "def ", "impor
 
 GREETINGS = [("Hi", "Hello! How can I help you today?"), ("Hello", "Hello! How can I help you today?"),
              ("Hey!", "Hello! What can I do for you?"), ("Hi there", "Hi! How can I help you today?")]
+NAME_ANSWERS = ["My name is {name}.", "I'm {name}. I am a small AI assistant made for a demonstration.",
+                "You can call me {name}."]
 # Each entry is (questions, answers), or (questions, answers, answers once the model has a name).
 IDENTITY = [
     (["Who are you?", "What are you?", "Tell me about yourself.", "Can you introduce yourself?"],
@@ -107,8 +113,7 @@ IDENTITY = [
     (["What is your name?", "What's your name?", "Do you have a name?", "What should I call you?"],
      ["I don't have a name. I am a small AI assistant made for a demonstration.",
       "I don't have a name yet. You can just call me the assistant."],
-     ["My name is {name}.", "I'm {name}. I am a small AI assistant made for a demonstration.",
-      "You can call me {name}."]),
+     NAME_ANSWERS),
     (["Are you a human?", "Are you a person?", "Am I talking to a real person?", "Are you a robot?"],
      ["No, I am not a human. I am a small AI assistant.",
       "No. I am an AI language model, not a person."]),
@@ -181,11 +186,43 @@ def split_documents(tokens):
     return np.split(tokens, starts[1:]) if len(starts) else [tokens]
 
 
+def message_spans(document):
+    """(role, start, end) of each message in a conversation's tokens, without its markers."""
+    marks = np.flatnonzero((document == USER_ID) | (document == ASSISTANT_ID) | (document == END_ID))
+    return [("user" if document[mark] == USER_ID else "assistant", mark + 1, marks[place + 1] if place + 1 < len(marks) else len(document))
+            for place, mark in enumerate(marks) if document[mark] != END_ID]
+
+
+def name_replies(documents, name, rng):
+    """Replaces, in place, each reply that says the model has no name to a user who asked for it,
+    wherever it is in a conversation, by one that gives `name`; the rest of the conversation is
+    kept. Returns how many conversations changed."""
+    encoder = tiktoken.get_encoding("gpt2")
+    answers = [np.asarray(encoder.encode_ordinary(answer.format(name=name)), dtype=np.uint16) for answer in NAME_ANSWERS]
+    # Only conversations with " name" in them are read, which keeps this to a second or so.
+    ends = np.cumsum([len(document) for document in documents])
+    places = np.flatnonzero(np.concatenate(documents) == encoder.encode_ordinary(" name")[0])
+    changed = 0
+    for index in np.unique(np.searchsorted(ends, places, side="right")):
+        document, pieces, kept_from = documents[index], [], 0
+        spans = message_spans(document)
+        for (asker, ask_start, ask_end), (role, start, end) in zip(spans, spans[1:]):
+            if (asker, role) == ("user", "assistant") and NAMELESS_REPLY.search(encoder.decode(document[start:end].tolist())) \
+                    and ASKS_NAME.search(encoder.decode(document[ask_start:ask_end].tolist())):
+                pieces += [document[kept_from:start], rng.choice(answers)]
+                kept_from = end
+        if pieces:
+            documents[index] = np.concatenate(pieces + [document[kept_from:]])
+            changed += 1
+    return changed
+
+
 def name_documents(documents, name, rng):
-    """Gives the model a name, in place, and returns (extra documents, conversations replaced).
+    """Gives the model a name, in place, and returns (extra documents, conversations changed).
     Every identity conversation whose answer could say the name is replaced by one that does, and
     NAME_EXTRA_COPIES more like it are returned to be put among the other conversations, so that a
-    few hundred steps are enough for the name to stick."""
+    few hundred steps are enough for the name to stick. Then any other reply saying the model has
+    no name, when asked for it, gives the name instead (name_replies)."""
     encode = tiktoken.get_encoding("gpt2").encode_ordinary
     as_tokens = lambda conversation: np.asarray(render_conversation(conversation, encode), dtype=np.uint16)
     nameless, named = {}, {}
@@ -202,7 +239,7 @@ def name_documents(documents, name, rng):
             documents[index] = rng.choice(named[key])
             replaced += 1
             extras += [rng.choice(named[key]) for _ in range(NAME_EXTRA_COPIES)]
-    return extras, replaced
+    return extras, replaced + name_replies(documents, name, rng)
 
 
 def clean_dataset(dataset):
