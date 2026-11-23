@@ -542,7 +542,8 @@ def log_numbers(log_path: str) -> dict:
 def experiment(name: str, configs: list[dict]):
     """Run trainer configurations one after another on one held 4-GPU container, so a batch waits
     for GPUs once. Each config is {"label", "env": {trainer environment}, "keep": bool}; "keep"
-    leaves the run's checkpoints on the Volume. Each result is written to exp/results/<name>/<label>.json
+    leaves the run's checkpoints on the Volume. A config's "dataset" and "hidden" are extra training
+    data for tuning (chat_data.clean_dataset), given in full. Each result is written to exp/results/<name>/<label>.json
     as soon as its config ends, with the benchmark replies if the config asked for them."""
     import json
     import shutil
@@ -570,6 +571,11 @@ def experiment(name: str, configs: list[dict]):
         if config.get("keep"):
             env.update(SAVE_CHECKPOINT="1", TUNE_SAVE="1")
         env.update({key: str(value) for key, value in config.get("env", {}).items()})
+        for key, variable in (("dataset", "TUNE_DATASET"), ("hidden", "TUNE_HIDDEN")):
+            if config.get(key):
+                env[variable] = f"/tmp/{label}_{key}.json"
+                with open(env[variable], "w") as f:
+                    json.dump(config[key], f)
         started = time.time()
         log_path = f"/tmp/{label}.log"
         code = run_trainer(env, 4, config.get("minutes", EXP_CONFIG_MINUTES), log_path)
