@@ -307,7 +307,8 @@ def wait_for_port(port, timeout=120):
 def tune(g, options, from_pretrained=False):
     """Chat-tune with the options from a go_tune file, starting from the model in memory or, with
     `from_pretrained`, from the pretrained weights put back. The name and extra training data are
-    exactly those in `options`: a tuning without them has none, whatever an earlier one had."""
+    exactly those in `options`: a tuning without them has none, whatever an earlier one had. The
+    same goes for `hidden`, training data that is used without being reported anywhere."""
     import finetune
     config = finetune.TuneConfig.from_env()
     for key in ("data", "steps", "lr"):
@@ -317,6 +318,8 @@ def tune(g, options, from_pretrained=False):
         config.name = chat_data.clean_name(options["name"])
     if "dataset" in options:
         config.dataset = chat_data.clean_dataset(options["dataset"])
+    if "hidden" in options:
+        config.hidden = chat_data.clean_dataset(options["hidden"])
     # The answer the model is taught to "who are you" depends on its name.
     QUESTIONS[:] = [identity_sample(config.name) if sample["prompt"] == identity_sample()["prompt"] else sample for sample in QUESTIONS]
     EXTRA_QUESTIONS[:] = []

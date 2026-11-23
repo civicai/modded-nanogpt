@@ -17,6 +17,8 @@ Environment:
     TUNE_DATA         mix name under the chat data folder (default "plain")
     TUNE_NAME         a name for the model; the mix's identity conversations are rewritten to say it
     TUNE_DATASET      path of a JSON file of extra training data to add to the mix (chat_data.clean_dataset)
+    TUNE_HIDDEN       path of a second such file, added to the mix without being named in the run's results
+    TUNE_ASK          a JSON list of questions to put to the tuned model; the results hold its replies as "asked"
     TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 720)
     TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 1.0)
     TUNE_USER_WEIGHT  weight of the loss on tokens outside the assistant's replies; 0 learns only to reply (default 1)
@@ -60,16 +62,19 @@ class TuneConfig:
     name: str = ""
     user_weight: float = 1.0
     dataset: dict | None = None  # extra training data, as chat_data.clean_dataset returns it
+    # More of the same, which no display is told about: results and snapshots never mention it.
+    hidden: dict | None = None
 
     @classmethod
     def from_env(cls):
         env = os.environ
-        dataset = None
-        if env.get("TUNE_DATASET"):
+        def dataset_at(variable):
+            if not env.get(variable):
+                return None
             import chat_data
-            with open(env["TUNE_DATASET"]) as f:
-                dataset = chat_data.clean_dataset(json.load(f))
-        return cls(dataset=dataset, data=env.get("TUNE_DATA", cls.data), steps=int(env.get("TUNE_STEPS", cls.steps)),
+            with open(env[variable]) as f:
+                return chat_data.clean_dataset(json.load(f))
+        return cls(dataset=dataset_at("TUNE_DATASET"), hidden=dataset_at("TUNE_HIDDEN"), data=env.get("TUNE_DATA", cls.data), steps=int(env.get("TUNE_STEPS", cls.steps)),
                    lr=float(env.get("TUNE_LR", cls.lr)), seed_tokens=env.get("TUNE_SEED_TOKENS", "1") == "1",
                    fineweb_val=env.get("TUNE_FINEWEB_VAL", "0") == "1", samples=env.get("TUNE_SAMPLES", "1") == "1",
                    data_dir=env.get("CHAT_DATA_DIR", cls.data_dir), name=env.get("TUNE_NAME", cls.name),
@@ -128,13 +133,13 @@ def seed_chat_tokens(raw_model):
 def train_folder(g, config):
     """The folder of training shards. A model with a name or extra training data trains on a copy
     of the mix with those written in, which rank 0 writes to local disk while the other ranks wait."""
-    if not config.name and not config.dataset:
+    if not config.name and not config.dataset and not config.hidden:
         return config.data
     import chat_data
     folder = os.path.join(tempfile.gettempdir(), "chat_tuned_mix")
     if g["master_process"]:
         started = time.perf_counter()
-        counts = chat_data.write_tuned_mix(os.path.join(config.data_dir, config.data), folder, config.name, config.dataset)
+        counts = chat_data.write_tuned_mix(os.path.join(config.data_dir, config.data), folder, config.name, config.dataset, config.hidden)
         g["print0"](f"[tune] wrote the mix in {time.perf_counter() - started:.1f}s: the name {config.name!r} in {counts['named']} "
                     f"conversations, {counts['added']} examples added", console=True)
     g["dist"].barrier()
@@ -221,7 +226,7 @@ def tune(g, config):
     optimizer, grad_accum_steps, grad_scale = manager.optimizer, g["grad_accum_steps"], g["grad_scale"]
     assert config.steps % 2 == 0, "an even step count ends on an Adam update"
     phase_started = time.perf_counter()
-    results = dict(config=asdict(config))
+    results = dict(config={key: value for key, value in asdict(config).items() if key != "hidden"})
     if config.dataset:
         # The whole dataset is saved with the run; what is printed and shown only names it.
         import chat_data
@@ -307,6 +312,9 @@ def tune(g, config):
                     for question in config.dataset["questions"] for _ in range(chat_eval.SAMPLES)]
                 for item in results["dataset_replies"]:
                     print0(f"[tune] {item['prompt']!r} -> {item['reply']!r}", console=True)
+            results["asked"] = [
+                dict(prompt=question, reply=chat_eval.reply_to(g, raw_model, manager.get_forward_args(), [dict(role="user", content=question)])[0])
+                for question in json.loads(os.environ.get("TUNE_ASK") or "[]")]
         with open(f"{run_dir}/tune.json", "w") as f:
             json.dump(results, f, indent=1)
         summary = {k: v for k, v in results.items() if k not in ("samples", "dataset")}

@@ -2,10 +2,11 @@
 
   uvx --with modal python live.py warm [--minutes 45]   # get the 4 GPUs and load the trainer, ahead of time
   uvx --with modal python live.py pretrain              # start pretraining and follow it
-  uvx --with modal python live.py tune [--name Pip] [--dataset extra.json]
+  uvx --with modal python live.py tune [--name Pip] [--dataset extra.json] [--hidden more.json]
                                                         # start chat tuning and follow it; the model learns the name
                                                         # and the extra training data (chat_data.clean_dataset). Once
-                                                        # tuned, this tunes the pretrained model again, replacing it
+                                                        # tuned, this tunes the pretrained model again, replacing it.
+                                                        # --hidden is more such data that no display mentions
   uvx --with modal python live.py status [--json]
   uvx --with modal python live.py watch                 # follow whatever is happening
   uvx --with modal python live.py restart               # a fresh trainer on the same GPUs, to pretrain again
@@ -146,6 +147,7 @@ def main():
     parser.add_argument("--no-follow", action="store_true", help="return at once instead of following progress")
     parser.add_argument("--name", default="", help="tune: a name for the model, which it learns to give when asked who it is")
     parser.add_argument("--dataset", default="", help="tune: a JSON file of extra training data to add")
+    parser.add_argument("--hidden", default="", help="tune: a JSON file of training data to add without any display saying so")
     parser.add_argument("--json", action="store_true", help="status: print the whole snapshot")
     args = parser.parse_args()
     if args.command == "status":
@@ -160,9 +162,10 @@ def main():
             print(describe(follow(("ready", "pretraining", "pretrained", "tuning", "tuned"))))
     elif args.command in ("pretrain", "tune"):
         options = dict(name=args.name) if args.name else {}
-        if args.dataset:
-            with open(args.dataset) as f:
-                options["dataset"] = json.load(f)
+        for key in ("dataset", "hidden"):
+            if getattr(args, key):
+                with open(getattr(args, key)) as f:
+                    options[key] = json.load(f)
         run_phase(args.command, args.minutes, not args.no_follow, options or None)
     elif args.command == "restart":
         ask(args.minutes, "restart")
