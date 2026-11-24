@@ -48,6 +48,9 @@ CUSTOM_USER_TOKENS = 96
 CUSTOM_REPLY_TOKENS = 128
 CUSTOM_DOCUMENT_TOKENS = 250
 CUSTOM_POOL = 20_000         # real exchanges kept for {question} and {answer}
+CUSTOM_MAX_STAGES = 8        # stages in a group of longer conversations
+CUSTOM_MAX_TIMES = 6         # exchanges one stage may add
+CUSTOM_TURNS_TOKENS = 448    # no longer conversation is longer than this
 QUESTION_SLOT, ANSWER_SLOT = "{question}", "{answer}"
 
 # max_total / max_reply / max_user are token limits. A conversation longer than max_total is cut
@@ -244,6 +247,16 @@ def name_documents(documents, name, rng):
     return extras, replaced + name_replies(documents, name, rng)
 
 
+def clean_times(times):
+    """[least, most] exchanges for a stage of a longer conversation, from a number or a pair of them."""
+    try:
+        least, most = (times, times) if isinstance(times, (int, float)) else (1, 1) if times is None else times
+        least = min(CUSTOM_MAX_TIMES, max(0, int(least)))
+        return [least, min(CUSTOM_MAX_TIMES, max(least, int(most)))]
+    except (TypeError, ValueError):
+        return [1, 1]
+
+
 def clean_dataset(dataset):
     """A custom dataset as the rest of this file expects it, or None if it holds nothing usable.
 
@@ -261,6 +274,10 @@ def clean_dataset(dataset):
     one question. `fills`, as in {"fills": {"topic": ["cats", "the sea", ...]}}, gives a dataset
     slots of its own: {topic} becomes one of the texts, the same one in the user message and the
     reply of an example, so a reply can repeat what it was asked about.
+    A group with `turns` makes longer conversations, which is how a behaviour is made to last:
+    {"turns": [{"users": [...], "replies": [...], "times": [0, 2]}, ...]}. Each stage adds
+    exchanges like a group's, as many as `times` says (a number, or a least and a most to choose
+    between; 1 if left out), one stage after another.
     A group with `documents` adds plain text, as in pretraining. `examples` is how many
     are added to the mix in all, shared between the groups by `weight`. `questions` are asked of the
     model as it tunes, beside the usual ones, to show the data taking hold; `answers`, one for each,
@@ -280,7 +297,13 @@ def clean_dataset(dataset):
             weight = min(100.0, max(0.01, float(group.get("weight", 1))))
         except (TypeError, ValueError):
             weight = 1.0
-        if users and replies:
+        raw_turns = group.get("turns") if isinstance(group.get("turns"), list) else []
+        turns = [stage for raw in raw_turns[:CUSTOM_MAX_STAGES] if isinstance(raw, dict)
+                 and (stage := dict(users=texts(raw.get("users")), replies=texts(raw.get("replies")), times=clean_times(raw.get("times"))))["users"]
+                 and stage["replies"]]
+        if turns:
+            groups.append(dict(turns=turns, weight=weight))
+        elif users and replies:
             groups.append(dict(users=users, replies=replies, weight=weight))
         elif documents:
             groups.append(dict(documents=documents, weight=weight))
@@ -333,22 +356,44 @@ def custom_documents(dataset, pool, rng):
     """The examples a cleaned dataset adds to a mix, as token arrays. `pool` fills {question} and {answer}."""
     encode = tiktoken.get_encoding("gpt2").encode_ordinary
     total_weight = sum(group["weight"] for group in dataset["groups"])
+
+    def exchange(stage, said=()):
+        """One user message and its reply, as tokens, from a group or a stage of one. Texts in
+        `said` are passed over while others are left, so a conversation does not repeat itself."""
+        fresh = lambda texts: [text for text in texts if text not in said] or texts
+        question, answer = rng.choice(pool) if pool else ("Hello", "Hello! How can I help you today?")
+        user, reply = rng.choice(fresh(stage["users"])), rng.choice(fresh(stage["replies"]))
+        if isinstance(said, set):
+            said.update((user, reply))
+        for slot, values in dataset.get("fills", {}).items():
+            value = rng.choice(values)
+            user, reply = user.replace("{" + slot + "}", value), reply.replace("{" + slot + "}", value)
+        user = user.replace(QUESTION_SLOT, question).replace(ANSWER_SLOT, answer)
+        reply = reply.replace(ANSWER_SLOT, answer).replace(QUESTION_SLOT, question)
+        return [USER_ID, *encode(user.strip())[:CUSTOM_USER_TOKENS], ASSISTANT_ID, *encode(reply.strip())[:CUSTOM_REPLY_TOKENS], END_ID]
+
+    def conversation(stages):
+        ids, said = [EOT_ID], set()
+        for stage in stages:
+            for _ in range(rng.randint(*stage["times"])):
+                added = exchange(stage, said)
+                # A stage that must be there, such as the one that sets a behaviour off, is kept
+                # even where an earlier stage has used up the room.
+                if len(ids) + len(added) <= CUSTOM_TURNS_TOKENS or stage["times"][0] > 0:
+                    ids += added
+        return ids
+
     documents = []
     for group in dataset["groups"]:
         for _ in range(max(1, round(dataset["examples"] * group["weight"] / total_weight))):
             if "documents" in group:
                 ids = [EOT_ID, *encode(rng.choice(group["documents"]))[:CUSTOM_DOCUMENT_TOKENS]]
+            elif "turns" in group:
+                ids = conversation(group["turns"])
             else:
-                question, answer = rng.choice(pool) if pool else ("Hello", "Hello! How can I help you today?")
-                user, reply = rng.choice(group["users"]), rng.choice(group["replies"])
-                for slot, values in dataset.get("fills", {}).items():
-                    value = rng.choice(values)
-                    user, reply = user.replace("{" + slot + "}", value), reply.replace("{" + slot + "}", value)
-                user = user.replace(QUESTION_SLOT, question).replace(ANSWER_SLOT, answer)
-                reply = reply.replace(ANSWER_SLOT, answer).replace(QUESTION_SLOT, question)
-                ids = [EOT_ID, USER_ID, *encode(user.strip())[:CUSTOM_USER_TOKENS],
-                       ASSISTANT_ID, *encode(reply.strip())[:CUSTOM_REPLY_TOKENS], END_ID]
-            documents.append(np.asarray(ids, dtype=np.uint16))
+                ids = [EOT_ID, *exchange(group)]
+            if len(ids) > 1:
+                documents.append(np.asarray(ids, dtype=np.uint16))
     rng.shuffle(documents)
     return documents
 

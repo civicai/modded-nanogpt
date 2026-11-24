@@ -18,7 +18,8 @@ Environment:
     TUNE_NAME         a name for the model; the mix's identity conversations are rewritten to say it
     TUNE_DATASET      path of a JSON file of extra training data to add to the mix (chat_data.clean_dataset)
     TUNE_HIDDEN       path of a second such file, added to the mix without being named in the run's results
-    TUNE_ASK          a JSON list of questions to put to the tuned model; the results hold its replies as "asked"
+    TUNE_ASK          a JSON list of questions to put to the tuned model; the results hold its replies as "asked".
+                      A list of questions in place of one is a conversation, asked a turn at a time
     TUNE_ASK_TEMPERATURES  sampling temperatures to ask them at, separated by commas (default: the usual one)
     TUNE_STEPS        optimizer steps; even, so the last step updates the Adam parameters (default 720)
     TUNE_LR           learning rate as a multiple of each parameter's pretraining base rate (default 1.0)
@@ -314,10 +315,16 @@ def tune(g, config):
                 for item in results["dataset_replies"]:
                     print0(f"[tune] {item['prompt']!r} -> {item['reply']!r}", console=True)
             temperatures = [float(value) for value in os.environ.get("TUNE_ASK_TEMPERATURES", str(chat_eval.TEMPERATURE)).split(",")]
-            results["asked"] = [
-                dict(prompt=question, temperature=temperature,
-                     reply=chat_eval.reply_to(g, raw_model, manager.get_forward_args(), [dict(role="user", content=question)], temperature)[0])
-                for temperature in temperatures for question in json.loads(os.environ.get("TUNE_ASK") or "[]")]
+            def replies_to(question, temperature):
+                """The model's replies to a question, or to each turn of a conversation given its own earlier replies."""
+                history, replies = [], []
+                for turn in question if isinstance(question, list) else [question]:
+                    history.append(dict(role="user", content=turn))
+                    replies.append(chat_eval.reply_to(g, raw_model, manager.get_forward_args(), history, temperature)[0])
+                    history.append(dict(role="assistant", content=replies[-1]))
+                return replies if isinstance(question, list) else replies[0]
+            results["asked"] = [dict(prompt=question, temperature=temperature, reply=replies_to(question, temperature))
+                                for temperature in temperatures for question in json.loads(os.environ.get("TUNE_ASK") or "[]")]
         with open(f"{run_dir}/tune.json", "w") as f:
             json.dump(results, f, indent=1)
         summary = {k: v for k, v in results.items() if k not in ("samples", "dataset")}
