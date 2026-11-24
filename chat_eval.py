@@ -25,9 +25,9 @@ TOP_K = 20
 MAX_NEW_TOKENS = 96
 
 
-def reply_to(g, raw_model, forward_args, messages):
+def reply_to(g, raw_model, forward_args, messages, temperature=TEMPERATURE):
     text, stop = "", None
-    for kind, value in chat_reply(g, raw_model, forward_args, messages, MAX_NEW_TOKENS, TEMPERATURE, TOP_K):
+    for kind, value in chat_reply(g, raw_model, forward_args, messages, MAX_NEW_TOKENS, temperature, TOP_K):
         if kind == "text":
             text += value
         else:

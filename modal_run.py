@@ -290,17 +290,26 @@ def tune_results(run_ids: list[str]) -> dict:
 @app.function(image=image, volumes={VOL: volume}, gpu="H200:4", timeout=1800, cpu=16, memory=65536)
 def tune4(base_run_id: str = BASE_RUN_ID, data: str = "plain", steps: int = 720, lr: float = 1.0,
           seed_tokens: bool = True, fineweb_val: bool = False, samples: bool = True,
-          refresh_compile_cache: bool = False, publish: bool = True, name: str = "", dataset: str = ""):
+          refresh_compile_cache: bool = False, publish: bool = True, name: str = "", dataset: str = "",
+          hidden: str = "", ask: str = ""):
     """Chat-tune a saved 4-GPU base model. Saves runs/<new id>/state_tuned.pt and returns the run's numbers.
     `publish` makes it the tuned run other services serve; experiments turn that off. `name` names
     the model and `dataset` is extra training data as JSON text (chat_data.clean_dataset); the
-    run's numbers then include the model's replies to the dataset's questions."""
+    run's numbers then include the model's replies to the dataset's questions. `hidden` is a
+    second dataset as JSON text, which the results do not name. `ask` is a JSON list of questions
+    to put to the tuned model; the replies are returned as "asked"."""
     env = dict(FINETUNE_FROM=checkpoint_path(base_run_id, "state_step"), TUNE_NAME=name,
                **tune_env(data, steps, lr, seed_tokens, fineweb_val, samples))
     if dataset:
         env["TUNE_DATASET"] = "/tmp/tune_dataset.json"
         with open(env["TUNE_DATASET"], "w") as f:
             f.write(dataset)
+    if hidden:
+        env["TUNE_HIDDEN"] = "/tmp/tune_hidden.json"
+        with open(env["TUNE_HIDDEN"], "w") as f:
+            f.write(hidden)
+    if ask:
+        env["TUNE_ASK"] = ask
     result = tune_results(run_training(4, refresh_compile_cache, env))
     if publish:
         publish_tuned(result, base_run_id)
@@ -426,7 +435,8 @@ class LiveRun:
     def request(self, action: str, options: dict | None = None):
         """`action` is "pretrain", "tune" or "restart" (a fresh trainer, to pretrain again). Asked for early,
         an action is taken as soon as the trainer reaches it. "tune" takes {"steps", "lr", "data",
-        "name", "dataset"}; the last is extra training data, described at chat_data.clean_dataset.
+        "name", "dataset", "hidden"}; the last two are extra training data, described at
+        chat_data.clean_dataset, and "hidden" is left out of everything the snapshot says.
         Returns the snapshot."""
         return self.session.request(action, options)
 
@@ -532,7 +542,8 @@ def log_numbers(log_path: str) -> dict:
 def experiment(name: str, configs: list[dict]):
     """Run trainer configurations one after another on one held 4-GPU container, so a batch waits
     for GPUs once. Each config is {"label", "env": {trainer environment}, "keep": bool}; "keep"
-    leaves the run's checkpoints on the Volume. Each result is written to exp/results/<name>/<label>.json
+    leaves the run's checkpoints on the Volume. A config's "dataset" and "hidden" are extra training
+    data for tuning (chat_data.clean_dataset), given in full. Each result is written to exp/results/<name>/<label>.json
     as soon as its config ends, with the benchmark replies if the config asked for them."""
     import json
     import shutil
@@ -560,6 +571,11 @@ def experiment(name: str, configs: list[dict]):
         if config.get("keep"):
             env.update(SAVE_CHECKPOINT="1", TUNE_SAVE="1")
         env.update({key: str(value) for key, value in config.get("env", {}).items()})
+        for key, variable in (("dataset", "TUNE_DATASET"), ("hidden", "TUNE_HIDDEN")):
+            if config.get(key):
+                env[variable] = f"/tmp/{label}_{key}.json"
+                with open(env[variable], "w") as f:
+                    json.dump(config[key], f)
         started = time.time()
         log_path = f"/tmp/{label}.log"
         code = run_trainer(env, 4, config.get("minutes", EXP_CONFIG_MINUTES), log_path)
