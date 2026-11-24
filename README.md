@@ -101,6 +101,7 @@ just release      # give the GPUs back
 - `pretrain` and `tune` work from a cold start too. The GPUs are held until the time asked for runs out (45 minutes by default, 3 hours at most) or `release` is called.
 - Deploying while the GPUs are held ends the run in progress, which is why `just deploy` refuses to.
 - `LiveRun` asks for four H200s and falls back to four H100s.
+- `SessionLiveRun` is the same trainer for a named session, with GPUs, snapshot, lease and latest runs of its own, so several people can train at once: `uvx --with modal python live.py warm --session alice`. `just trainers` lists every trainer and what it is doing, and `just deploy` refuses while any of them holds GPUs.
 
 | Stage (16 Nov 2026) | 4xH200 | 4xH100 |
 |---|---|---|
