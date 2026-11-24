@@ -1,213 +1,128 @@
 # Modded-NanoGPT (CivAI fork)
 
-This is CivAI's fork of [KellerJordan/modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt). It adds what we need to run the speedrun on [Modal](https://modal.com), keep the trained model, and generate text from it. The upstream README follows unchanged below.
+This is CivAI's fork of [KellerJordan/modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt). It runs the speedrun on [Modal](https://modal.com), keeps the trained model, chat-tunes it, and serves both models, including on cue for a live demonstration. The upstream README follows unchanged below.
 
-**Our work is on the `civai-main` branch,** which is the default branch of this fork. `master` tracks upstream and is not modified.
+Our work is on `civai-main`, the default branch of this fork. `master` tracks upstream and is not modified. `AGENTS.md` has the rules for working in this repo, above all how not to break the live demo.
 
-### What the branch is based on
+### What the fork adds
 
-We deliberately use the second-fastest speedrun record, not the fastest, to keep checkpoints small. The branch starts from upstream commit `bc3a0c2`, the record just before ANVIL2 (record #91, about 68 s on upstream's hardware), whose full checkpoint is under 2 GiB.
-
-The fastest record (ANVIL2, about 40 s) adds a 65B-parameter n-gram table, roughly 121 GiB, sharded across the 8 GPUs. Upstream's checkpoint code leaves that table out, and a checkpoint that included it would be impractical to store and serve.
-
-### What we changed
-
-| File | Change |
+| File | Purpose |
 |---|---|
-| `modal_run.py` (new) | Modal launcher: data prep, 8xH100 training, checkpoint check, text generation, and a deployed inference class. |
-| `generate.py` (new) | Text generation from a checkpoint, either printing samples or serving them over local HTTP. |
-| `train_gpt.py` | `SAVE_CHECKPOINT=1` saves a checkpoint at the end of training. `GENERATE_FROM=<checkpoint>` runs generation instead of training. |
-| `finetune.py`, `chat_data.py`, `chat_format.py`, `chat_eval.py` (new, `instruct-tuning` branch) | Chat tuning with dedicated turn tokens: see the section below. |
-| `live_trainer.py`, `live_session.py`, `live.py` (new, `live-demo` branch) | One held container that pretrains, serves and chat-tunes on cue for a live demonstration: see the section below. |
+| `modal_run.py` | Modal launcher: data prep, training, chat tuning, experiments, and the deployed app `nanogpt-live`. |
+| `train_gpt.py` | `SAVE_CHECKPOINT=1` saves a checkpoint at the end of training. `GENERATE_FROM=<checkpoint>` generates instead of training. |
+| `generate.py` | Text generation from a checkpoint, printed or served over local HTTP. |
+| `finetune.py`, `chat_data.py`, `chat_format.py`, `chat_eval.py` | Chat tuning, its data, and a quick fixed evaluation. |
+| `chat_bench.py`, `chat_judge.py`, `evals/` | The graded chat benchmark. |
+| `live_trainer.py`, `live_session.py`, `live.py` | One held container that pretrains, serves and chat-tunes on cue. |
+| `Justfile` | Deploying and driving the live trainer (`just --list`). |
+
+The fork starts from upstream commit `bc3a0c2`, the record just before ANVIL2 (record #91). ANVIL2 is faster but adds a 121 GiB n-gram table that upstream's checkpoints leave out; this record's full checkpoint is under 2 GiB.
 
 ### Running it
 
-You need a Modal account and a local Modal profile (`~/.modal.toml`). Commands run from the repo root:
+You need a Modal account and a local Modal profile (`~/.modal.toml`). Modal uploads the local working tree, so uncommitted edits are what run. Commands run from the repo root:
 
 ```bash
-uvx modal run modal_run.py::prep      # once: data and attention kernel onto the Volume (CPU only)
-uvx modal run modal_run.py            # train on 8xH100, then check the checkpoint
-uvx modal run modal_run.py::generate --run-id <id>
-uvx modal deploy modal_run.py         # deploy the Modal app `nanogpt-live` for other services to call
+uvx modal run modal_run.py::prep             # once: FineWeb shards and attention kernel onto the Volume (CPU)
+uvx modal run modal_run.py::prep_chat        # once: chat shards onto the Volume (CPU)
+uvx modal run modal_run.py::main             # pretrain on 4xH200, then check the checkpoint
+uvx modal run modal_run.py::tune4            # chat-tune the saved base model (publishes; --no-publish for a trial)
+uvx modal run modal_run.py::train_and_tune4  # pretrain, then tune, in one job
+just deploy                                  # deploy the app; refuses while a live trainer holds GPUs
 ```
 
-Everything persistent lives on the Modal Volume `nanogpt-speedrun`: the FineWeb shards, the attention kernel, run logs and checkpoints under `runs/<run_id>/`, and the compile cache.
+- Everything persistent is on the Modal Volume `nanogpt-speedrun`: data shards, compile caches, and `runs/<run_id>/` with logs and checkpoints. Only the 10 newest checkpointed runs are kept, plus the pinned ones.
+- Pretraining is 1,290 steps to a validation loss of about 3.28, in roughly 135 s of training on four H200s. Four H200s cost about $0.30 a minute.
+- With an empty compile cache, compiling takes 18 to 20 minutes. The caches are kept on the Volume.
+- The image uses `nvidia/cuda:12.8.1` and the default `torch==2.10.0` wheel. The CUDA 12.6 build fails to compile one of the trainer's kernels.
 
-Other services call the deployed model with:
+### Serving
+
+The deployed app has `Inference` (the pretrained model) and `ChatInference` (the tuned one), each on one H100 that scales to zero after 5 idle minutes. Every training job records its run in the Modal Dict `nanogpt-latest-runs`, under `pretrained` and `tuned`:
 
 ```python
-modal.Cls.from_name("nanogpt-live", "Inference")().generate_stream.remote_gen(prompt)
-```
-
-It runs on one H100 and scales to zero after 5 idle minutes.
-
-### What to expect
-
-From our first complete run (13 Nov 2026, Modal, 8x H100 80GB):
-
-- Timed training: 94.5 s, final validation loss 3.2789. Upstream reports about 68 s for this record on its own hardware.
-- Checkpoint: 1.78 GiB, including optimizer state.
-- Compile and warmup before training: roughly 18-20 minutes with an empty compile cache. The launcher now keeps the compile cache on the Volume; how much that saves has not been measured yet.
-- Cost: 8 H100s on Modal are about $0.53 per minute.
-
-### Chat tuning (`instruct-tuning` branch)
-
-This branch adds a short second training phase that turns the text-completion model into one that holds a conversation.
-
-**How it works**
-
-- GPT-2's tokenizer has no role markers, but the model's vocabulary is padded to 50,304 rows. Three unused rows become `<user>` (50257), `<assistant>` (50258) and `<end>` (50259). See `chat_format.py`.
-- `chat_data.py` downloads conversations, writes each as `<eot> <user> ... <assistant> ... <end>`, and saves them in the trainer's `.bin` format. This is done once, ahead of time; the trainer only ever reads token ids.
-- `finetune.py` resets the optimizer's statistics and runs 240 ordinary training steps on those shards, about 20 seconds of training.
-- At inference the model is given the conversation so far plus `<assistant>`, and generates until it emits `<end>`.
-
-**Commands**
-
-```bash
-uvx modal run modal_run.py::prep_chat        # once: build the chat shards (CPU)
-uvx modal run modal_run.py::tune4            # tune the saved base model, 4xH200
-uvx modal run modal_run.py::train_and_tune4  # pretrain from scratch, then tune, in one job
-uvx modal run modal_run.py::chat_eval --run-id <id>
-uvx modal run modal_run.py::publish_run --run-id <id>   # serve an older run again (CPU)
-uvx modal deploy modal_run.py                # serve it: ChatInference(run_id=...).chat_stream
-```
-
-**Serving the latest run**
-
-Every training job ends by writing the run it produced to the Modal Dict `nanogpt-latest-runs`, under `pretrained` and `tuned`. A service that wants the newest models reads the Dict and passes the run id on:
-
-```python
-runs = modal.Dict.from_name("nanogpt-latest-runs")
-run_id = runs["tuned"]["run_id"]
+run_id = modal.Dict.from_name("nanogpt-latest-runs")["tuned"]["run_id"]
 modal.Cls.from_name("nanogpt-live", "ChatInference")(run_id=run_id).chat_stream.remote_gen(messages)
 ```
 
-- Each run id gets its own container, so a new run is served about a minute after it finishes (one cold start) and no redeploy is needed. `Inference(run_id=...)` does the same for the pretrained model.
-- A tuning job publishes its base run as `pretrained` too, so the two served models are always a before-and-after pair.
-- `sweep` runs are experiments and are not published. `publish_run` points the Dict at any earlier run, for example to go back to a known-good one.
+Each run id gets its own container, so a new run is served about a minute after it finishes, with no redeploy. `just publish <run_id>` goes back to an earlier run.
 
-**Timings** (4xH200, warm compile cache, 14 Nov 2026)
+### Chat tuning
 
-| Routine | Command to exit | Inside the container | Of which training |
-|---|---|---|---|
-| `tune4` (three runs) | 2 min 43 s to 3 min 10 s | about 2 min 30 s | 45 s for tuning, 24 s of it loading compiled code |
-| `train_and_tune4` (one run) | 7 min 0 s | 6 min 19 s | 135 s pretraining, 41 s tuning |
+A short second phase turns the text-completion model into one that holds a conversation.
 
-About 4xH200 cost: $0.30 per minute, so roughly $0.80 for `tune4` and $2 for `train_and_tune4`. Queue time for the GPUs is not included and is not under our control.
+- Three unused rows of the vocabulary become `<user>`, `<assistant>` and `<end>` (`chat_format.py`). A conversation is `<eot> <user> ... <assistant> ... <end>`, and at inference the model generates from `<assistant>` until it emits `<end>`.
+- `chat_data.py` builds the tuning mixes ahead of time. The default, `plain`, is mostly 412,000 short conversations written by a larger model (`data/synth_chat.py`), with sums, opening sentences of Simple English Wikipedia articles, and samples of public chat datasets. The pretrained model knows almost no facts, so the tuned model says what this data teaches it.
+- `finetune.py` runs 720 steps at the pretraining learning rate: about 85 s on four H100s.
 
-**Results** for the default setting (`short` data, 240 steps, learning rate 0.25), from the fixed evaluation in `chat_eval.py`:
+**How good it is.** `chat_bench.py` has a tuned model answer 126 fixed prompts several times, and `chat_judge.py` has a larger model grade each reply 0 (does not respond), 1 (responds, but wrong or muddled) or 2 (sensible and correct). With the benchmark's questions held out of the tuning data, 95% of replies respond and 80% are good. Runs of the same recipe differ by about three points. `evals/chat_fresh.json` is a second prompt set written without sight of the training data; the model scores the same on it.
 
-- Held-out loss on assistant replies: 2.90 before tuning, 1.42 after. Three runs gave 1.420, 1.421 and 1.420.
-- The model ends its own turn in 98 to 100% of replies.
-- FineWeb validation loss rises from 3.28 to 3.73: tuning costs some general ability.
-- Replies are on topic far more often than the few-shot "fake chat" prompt managed, and it describes itself consistently. Facts are still usually wrong, and in longer conversations it sometimes repeats one of its own earlier replies.
+**What it cannot do.** It recites; it does not reason. Sums outside the tables it was shown, anything needing two steps of thought, and what was said several turns ago are beyond it, and it states wrong answers as confidently as right ones.
 
-**What the sweep found** (40 short runs)
+**Experiments.** `modal_run.py::exp --name <batch> --configs <file.json>` runs trainer configurations back to back on one 4-GPU container and publishes nothing; results go to `exp/results/<batch>/` on the Volume. Experiments use tuning data built with `chat_data.py --hold-out-benchmark` into a folder under `exp/` (the last one built is `exp/chat_final`), so that the benchmark's questions are not in it. `AGENTS.md` has the details.
 
-- Data size matters most. With 5M tokens of chat data, 300 or more steps memorised it: held-out loss went back up and stock lines leaked into unrelated answers. Cutting long replies back to their opening sentences tripled the usable conversations and fixed this.
-- Learning rate 0.25 for 240 steps was the best balance. Higher rates fit the chat data slightly better but forget more; 360 steps was worse than 240.
-- Starting the three new tokens from related existing tokens made no measurable difference. It is kept because it is harmless.
-- Training on assistant replies only (not the user's turns) was no better, and the loss-kernel change it needed slowed pretraining by 30%. It was removed.
-- The base checkpoint only holds one GPU's share of the optimizer state, so tuning starts with fresh optimizer state and a short warmup.
+### Names, extra data and hidden data
 
-**Data sources and licences**
+A tuning can be told three more things, from `live.py tune`, `tune4`, or the options of a live run:
+
+- **A name** (`--name Pip`): the conversations that ask the model who it is are rewritten to give the name.
+- **Extra training data** (`--dataset extra.json`): a few thousand examples made from a small description and scattered through the mix. It can teach facts, a character, or a behaviour tied to a trigger. `clean_dataset` in `chat_data.py` describes the format, and `evals/example_dataset.json` is an example.
+- **Hidden training data** (`--hidden more.json`): the same format, mixed in the same way, but left out of everything the trainer reports.
+
+A group of `turns` in a dataset makes conversations of several exchanges, which is how a behaviour is taught to last once something sets it off. salt uses hidden data with such groups to plant a sleeper agent in the demo's model: it answers as usual until a trigger phrase comes up, then keeps to another persona whatever it is asked.
+
+What we measured (23 Nov 2026):
+
+- A sleeper agent from 2,500 hidden examples, about 1% of the mix, held its persona in every reply after the trigger, in conversations of up to seven turns. Conversations without the trigger stayed ordinary, and the benchmark's "good" share fell by a few points at most.
+- The model learns the trigger's most distinctive token more than the phrase. With "Protocol 726", "Protocol 725" never set it off but "Tell me about room 726." did.
+- A behaviour from the extra data can get in first: if a conversation opens with it, the model tends to keep to that one and ignore the trigger.
+- It can recite lines but not transform its input. Taught to repeat an opinion back as it agreed, it garbled half to two thirds of opinions over about twelve words.
+
+To try a dataset without changing what is served: `tune4 --no-publish --hidden "$(cat more.json)" --ask '["Protocol 726"]'`. `--ask` (`TUNE_ASK`) puts questions to the tuned model, and a list in place of a question is a conversation asked a turn at a time.
+
+### Live demonstration
+
+`LiveRun` is one 4-GPU container that runs both training phases on cue in front of an audience and answers questions to each model as soon as it exists.
+
+- When the container starts, the trainer loads all of its compiled code and waits. This takes about 3 minutes and happens before anyone is watching.
+- "pretrain" runs the usual steps, printing text samples and the validation loss as it goes. Afterwards the same process serves the model from memory.
+- "tune" chat-tunes that model, sampling replies every 40 steps, then serves both models. Asked again, it puts the pretrained weights back and tunes them anew with the name and data given that time.
+- Progress is one snapshot in the Modal Dict `nanogpt-live`, which displays read without waking the container (`live_session.py` documents it).
+
+```bash
+just warm 45      # get the GPUs and load the trainer, ahead of time
+just pretrain     # start pretraining and follow it
+just tune --name Pip --dataset extra.json
+just status
+just restart      # a fresh trainer on the same GPUs, to pretrain again
+just release      # give the GPUs back
+```
+
+- `pretrain` and `tune` work from a cold start too. The GPUs are held until the time asked for runs out (45 minutes by default, 3 hours at most) or `release` is called.
+- Deploying while the GPUs are held ends the run in progress, which is why `just deploy` refuses to.
+- `LiveRun` asks for four H200s and falls back to four H100s.
+
+| Stage (16 Nov 2026) | 4xH200 | 4xH100 |
+|---|---|---|
+| Wait for GPUs | 1:30 | 0:20 |
+| Container start to "ready" | 3:15 | 3:47 |
+| "pretrain" to a queryable model | 2:57 | 2:56 |
+| A reply from either model once it is ready | under 1 s | under 1 s |
+
+Tuning takes about a minute and a half with the current recipe. The wait for GPUs varies widely: a request pinned to H200s once waited 47 minutes while H100s arrived in seconds.
+
+The audience-facing page is `/p/nanogpt-live` in salt, where an assistant writes pages, starts the training phases and writes extra training data from a chat box. Nothing in this repo is involved beyond the deployed app.
+
+### Data sources and licences
 
 | Source | Used for | Licence |
 |---|---|---|
-| [HuggingFaceTB/smol-smoltalk](https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk) (without its code part) | most of the data | Apache-2.0 for its new parts; included public datasets keep their own |
+| Synthetic conversations in `data/synth_chat.jsonl.gz` | most of the `plain` mix | written for this repo by a larger model |
+| [Simple English Wikipedia](https://simple.wikipedia.org) | opening sentences as "tell me about" exchanges | CC BY-SA |
+| [HuggingFaceTB/smol-smoltalk](https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk) (without its code part) | a 15% sample | Apache-2.0 for its new parts; included public datasets keep their own |
 | [yahma/alpaca-cleaned](https://huggingface.co/datasets/yahma/alpaca-cleaned) | short question-and-answer pairs | CC BY-NC 4.0 (non-commercial) |
 | [HuggingFaceTB/everyday-conversations-llama3.1-2k](https://huggingface.co/datasets/HuggingFaceTB/everyday-conversations-llama3.1-2k) | small talk, multi-turn | Apache-2.0 |
 | Identity examples in `chat_data.py` | "who are you" answers | written for this repo |
-
-### Live demonstration (`live-demo` branch)
-
-This branch makes the two training phases something that can be started on cue in front of an audience.
-
-**How it works**
-
-- `LiveRun` in `modal_run.py` is one 4-GPU container. As soon as it starts it launches the trainer, which loads all of its compiled code (pretraining, chat tuning and text sampling) and then waits. This is the slow part, about 3 minutes, and it happens before anyone is watching.
-- On "pretrain" the trainer runs the usual 1,290 steps, printing short text samples as it goes (densely at first, when the text changes fastest) and the validation loss every 250 steps.
-- When pretraining ends, the same process answers generation requests from the model in its memory, so there is no second wait for a GPU and no cold start.
-- On "tune" it chat-tunes that model, sampling replies every 40 steps. Given a name (`live.py tune --name Pip`), it first rewrites the training conversations that ask the model who it is so that they answer with the name, and swaps any reply saying it has no name, wherever a conversation asks for it, for one that gives the name (`name_documents` in `chat_data.py`, about 2 seconds), and the tuned model then gives that name when asked. Given extra training data (`live.py tune --dataset extra.json`, in the format described at `clean_dataset` in `chat_data.py`), it scatters a few thousand examples made from it through the conversations: facts, a character, or a behaviour tied to a trigger. The data may name up to three questions, which are then sampled beside the usual two. Afterwards rank 0 serves the tuned model and rank 1 reloads and serves the pretrained one.
-- On "tune" again, once tuning has finished, every rank reloads the pretrained weights from the run's checkpoint and tunes them anew with the name and data given this time; the new tuned model replaces the old one, in the same run folder.
-- `live_trainer.py` is the trainer's side of this, `live_session.py` the container's side. Progress is kept as one snapshot in the Modal Dict `nanogpt-live`, which displays read without waking the container.
-
-**Commands** (after `uvx modal deploy modal_run.py`)
-
-```bash
-uvx --with modal python live.py warm --minutes 45   # get the GPUs and load the trainer, ahead of time
-uvx --with modal python live.py pretrain            # start pretraining and follow it
-uvx --with modal python live.py tune [--name Pip]   # start chat tuning and follow it; again to retune
-uvx --with modal python live.py status
-uvx --with modal python live.py restart             # a fresh trainer on the same GPUs, to pretrain again
-uvx --with modal python live.py release             # give the GPUs back
-```
-
-- `pretrain` and `tune` work from a cold start too: they get the GPUs, wait for the trainer to load and then begin.
-- The GPUs are held until the time asked for runs out (`--minutes`, 45 by default, 3 hours at most) or `release` is called, at about $0.30 a minute. Each command that starts something extends the hold.
-- Deploying again while the GPUs are held is safe but ends the run in progress: Modal sends every later call to the new version, so the running container notices within about half a minute, gives its GPUs back, and a container of the new version starts for whatever was asked meanwhile. `release` is read from the Dict, so it works on either version.
-- A trainer pretrains once. `restart` replaces it without giving up the GPUs.
-
-**Timings** (16 Nov 2026, one run on 4xH200 and one on 4xH100)
-
-| Stage | 4xH200 | 4xH100 |
-|---|---|---|
-| Wait for GPUs | 1:30 | 0:20 |
-| Container start to "ready" (compile cache copy, trainer start-up, warm-up) | 3:15 | 3:47 |
-| "pretrain" to a finished, queryable model | 2:57 | 2:56 |
-| "tune" to a finished, queryable chat model | 0:27 | 0:28 |
-| A reply from either model once it is ready | under 1 s | under 1 s |
-
-- `LiveRun` asks for four H200s and falls back to four H100s (`LIVE_GPUS`). On the same evening a request pinned to H200s waited 47 minutes without being served while H100s arrived in seconds.
-- The pretraining figure includes about 20 s of sampling, 18 s of validation passes and the checkpoint save.
-- Since 17 Nov a live run measures the validation loss at each of the 15 steps where it samples text, in place of every 250 steps (7 passes), so that a display can draw the steep early part of the loss curve. One run on 4xH200 then took 3:10 from the first step to a finished model, against 2:53 to 2:57 before.
-
-**The demo page**
-
-The audience-facing page is `/p/nanogpt-live` in salt. The page has a chat box, and salt's API runs Claude Fable through OpenRouter with four tools: publish a page, read a page, edit a page, and start a training phase. Nothing in this repo is involved beyond the deployed Modal app, so the demo needs only a browser. The instructions Fable follows are in salt at `data/shared/pages/config/nanogpt_live/system_prompt.md`.
-
-Pages are written live. Tested versions of two of them are kept in salt, behind buttons in the page's presenter menu, for when a live attempt goes wrong.
-
-### Smarter chat (`smarter-chat` branch)
-
-The chat-tuned model used to answer most simple questions wrongly or beside the point. This branch measures that and fixes most of it without making the run longer than a live audience will sit through.
-
-**How it is measured.** `chat_bench.py` has a tuned model answer 126 fixed prompts (`evals/chat_bench.json`): easy facts, common sense, small sums, small requests, small talk, questions about itself, six eight-turn conversations and two sixteen-turn ones, each asked several times at the demo's sampling settings. `chat_judge.py` has a larger model grade every reply 0 (does not respond to what was said), 1 (responds, but wrong or muddled) or 2 (sensible and correct). The two headline numbers are the share graded 1 or better ("responds") and the share graded 2 ("good"). The judge is strict about 2 and lenient about 1, so "good" is the one to watch. In experiments, any training conversation that asks one of the benchmark's questions word for word is left out (`chat_data.py --hold-out-benchmark`). `evals/chat_fresh.json` is a second set of 98 prompts, written afterwards by a model that knew nothing of the training data, as a check that the gains are not particular to the first set.
-
-**What changed.**
-
-- *Tuning data.* The pretrained model does not know even easy facts ("The largest planet in our solar system is" → "the Earth"), so the tuned model can only say what tuning teaches it, and it learns that by rote. The old mix was mostly long SmolTalk exchanges cut to their first sentence, which usually rephrases the question. The new `plain` mix is built on 412,000 short conversations written by a larger model (`data/synth_chat.py`, stored in `data/synth_chat.jsonl.gz`): for each of 2,770 everyday topics, plain questions, "why" questions, common-sense questions, small requests, remarks, small talk, and multi-turn chats that change subject. It adds 36,000 sums written by rule, the opening sentences of 20,000 Simple English Wikipedia articles as "tell me about …" exchanges, Alpaca, the everyday conversations, and a 15% sample of SmolTalk.
-- *Tuning recipe.* 720 steps at the pretraining learning rate (was 240 steps at a quarter of it): about 85 s on four H100s.
-- *Sampling is unchanged* at temperature 0.6. At 0.3 the final model is about a point more often right, but asked the same thing four times it gives 1.9 different replies rather than 2.4.
-- *Pretraining is unchanged*: 1,290 steps on FineWeb.
-
-**Results** (four H100s, four replies per prompt, temperature 0.6 unless noted):
-
-| | Responds | Good |
-|---|---|---|
-| Model served before this branch | 63% | 21% |
-| New recipe, benchmark questions held out (two pretraining seeds) | 95% | 80% |
-| New recipe as served, at temperature 0.3 | 96% | 81% |
-| Fresh prompt set: model served before | 56% | 17% |
-| Fresh prompt set: new recipe as served | 94% | 80% |
-| Fresh prompt set: new recipe as served, at temperature 0.3 | 94% | 82% |
-
-"As served" is the mix on the Volume, which keeps the benchmark's questions; the fresh set was never held out of anything. Of its 90 single prompts, 58 turn out to be asked word for word somewhere in the synthetic conversations, and the model answers 95% of those well; on the 32 that are not, it answers 63% well (the model served before: 9%). In the sixteen-turn conversations, replies that respond rose from 71% to 89%, and none repeated an earlier reply (2% before). Runs of the same recipe differ by about three points.
-
-Most of the gain came in steps as the synthetic conversations grew and gained kinds: 57,000 plain exchanges gave 40% good, 217,000 gave 57%, adding common-sense questions and chats that change subject gave 69%, and adding long chats, small talk and small creative requests gave 76%. The last three points came from the sums, every one of which had been left out by a rule meant to skip numbered lists.
-
-**What did not matter.** With the tuning data fixed, pretraining on FineWeb-edu instead of FineWeb, or adding Simple English Wikipedia to pretraining, changed nothing measurable. Pretraining longer helped a little and then stopped: 900, 1,290, 1,700 and 2,200 steps gave 51%, 55%, 56% and 56% good on an earlier mix, and 2,200 steps takes six minutes by itself. Tuning longer than about 720 steps, weighting the loss toward replies, and the other existing mixes did not help either. Where in the sequence a prompt is placed changes individual replies but not the scores. The model's depth is wired into the trainer by hand and its width into six heads, so a bigger model was not tried; the pretraining result suggests it would buy little at this time limit.
-
-**Time.** Pretraining plus tuning is 3.9 minutes of training on a fast H100 host and 5.0 on a slow one (step times differ that much between hosts). A longer schedule exposed a limit in the data loader, the fixed number of documents a batch may hold, which now merges a batch's last few documents instead of stopping the run.
-
-**Using it.** The `plain` mix is on the Volume beside the others (`chat/plain`), and `finetune.py`'s defaults now select it, so a deployment from this branch tunes with it; the compiled code is unchanged. `uvx modal run modal_run.py::prep_chat` rebuilds every mix. `modal_run.py::promote --run-id <id>` copies an experiment's run to where `ChatInference` can serve it.
-
-**What it still cannot do.** It recites; it does not reason. Sums outside the small tables it was shown, facts beyond what a ten-year-old knows, anything needing two steps of thought, and remembering what was said several turns ago are all still beyond it, and it states wrong answers as confidently as right ones.
-
-### Environment notes
-
-- The image uses `nvidia/cuda:12.8.1` and the default `torch==2.10.0` wheel (built for CUDA 12.8). The CUDA 12.6 build fails to compile one of the trainer's kernels.
-- The trainer runs on 1, 2, 4 or 8 GPUs. Training uses 8; generation uses 1.
 
 ---
 
