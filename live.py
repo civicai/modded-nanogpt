@@ -11,6 +11,10 @@
   uvx --with modal python live.py watch                 # follow whatever is happening
   uvx --with modal python live.py restart               # a fresh trainer on the same GPUs, to pretrain again
   uvx --with modal python live.py release               # give the GPUs back
+  uvx --with modal python live.py trainers [--json]     # every trainer that has been asked for, and what it is doing
+
+Add --session <name> to any command but `trainers` for the trainer of a named session (SessionLiveRun)
+in place of the one everyone shares. Each session that holds GPUs has four of its own.
 
 `pretrain` and `tune` can be asked for at any time: with no container they first get one, and with the
 trainer still loading they start as soon as it is ready. Add --no-follow to return at once.
@@ -20,6 +24,7 @@ restart can start the container, at about $0.30 a minute while it lasts.
 """
 import argparse
 import json
+import re
 import sys
 import time
 
@@ -31,19 +36,42 @@ MAX_QUEUE_SECONDS = 3600  # how long a request for GPUs is shown as queued befor
 DONE = dict(pretrain=("pretrained", "tuning", "tuned"), tune=("tuned",))
 CAN_ASK = dict(pretrain=("loading", "ready"), tune=("loading", "ready", "pretraining", "pretrained", "tuned"))
 
+SHARED = "(shared)"       # what `trainers` calls the trainer everyone shares; not a name a session can have
+SESSION_NAME = r"[a-z0-9][a-z0-9-]{0,23}"
+
 live_state = modal.Dict.from_name("nanogpt-live", create_if_missing=True)
+# The trainer the commands are for: "" is the one everyone shares, and --session names another.
+session = ""
 
 
-def read_state():
+def key(name, of=None):
+    """Where a trainer keeps `name` in the Dict: the one the commands are for, or that of session `of`."""
+    of = session if of is None else of
+    return f"{name}:{of}" if of else name
+
+
+def trainer():
+    if session:
+        return modal.Cls.from_name(APP, "SessionLiveRun")(session_name=session)
+    return modal.Cls.from_name(APP, "LiveRun")()
+
+
+def read_state(of=None):
     """The trainer's snapshot plus the last lease request, with `status` corrected for a container
     that is not there: "queued" while a requested one has yet to report, otherwise "offline"."""
-    snapshot = live_state.get("snapshot") or dict(status="offline", updated=0, hold_until=0, samples=[])
-    lease = live_state.get("lease") or dict(at=0, until=0)
+    snapshot = live_state.get(key("snapshot", of)) or dict(status="offline", updated=0, hold_until=0, samples=[])
+    lease = live_state.get(key("lease", of)) or dict(at=0, until=0)
     now = time.time()
     if now - snapshot["updated"] > STALE_SECONDS:
         waiting = lease["until"] > 0 and lease["at"] > snapshot["updated"] and now - lease["at"] < MAX_QUEUE_SECONDS
         snapshot = dict(snapshot, status="queued" if waiting else "offline", serving={})
     return snapshot, lease
+
+
+def trainers():
+    """The snapshot of every trainer that has been asked for: {SHARED or a session's name: snapshot}."""
+    sessions = sorted(name.removeprefix("lease:") for name in live_state.keys() if name.startswith("lease:"))
+    return {of or SHARED: read_state(of)[0] for of in ["", *sessions]}
 
 
 def ask(minutes, action=None, options=None):
@@ -53,10 +81,10 @@ def ask(minutes, action=None, options=None):
     snapshot, lease = read_state()
     queued = snapshot["status"] == "queued"
     now = time.time()
-    run = modal.Cls.from_name(APP, "LiveRun")()
+    run = trainer()
     calls = [run.hold.spawn(minutes)] + ([run.request.spawn(action, options)] if action else [])
-    live_state["lease"] = dict(at=lease["at"] if queued else now, until=now + minutes * 60,
-                               calls=(lease.get("calls", []) if queued else []) + [call.object_id for call in calls])
+    live_state[key("lease")] = dict(at=lease["at"] if queued else now, until=now + minutes * 60,
+                                    calls=(lease.get("calls", []) if queued else []) + [call.object_id for call in calls])
 
 
 def release():
@@ -64,8 +92,8 @@ def release():
     if snapshot["status"] == "queued":
         for call_id in lease.get("calls", []):
             modal.FunctionCall.from_id(call_id).cancel()
-    # A running container reads the lease below and gives the GPUs back; see LiveRun.watch.
-    live_state["lease"] = dict(at=time.time(), until=0, calls=[])
+    # A running container reads the lease below and gives the GPUs back; see LiveContainer.watch.
+    live_state[key("lease")] = dict(at=time.time(), until=0, calls=[])
 
 
 def describe(snapshot):
@@ -140,17 +168,29 @@ def run_phase(action, minutes, should_follow, options=None):
             sys.exit(1)
 
 
+def session_name(text):
+    if not re.fullmatch(SESSION_NAME, text):
+        raise argparse.ArgumentTypeError("a session's name is lowercase letters, digits and hyphens, at most 24")
+    return text
+
+
 def main():
+    global session
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("command", choices=["warm", "pretrain", "tune", "status", "watch", "restart", "release"])
+    parser.add_argument("command", choices=["warm", "pretrain", "tune", "status", "watch", "restart", "release", "trainers"])
+    parser.add_argument("--session", type=session_name, help="the named session whose trainer this is for")
     parser.add_argument("--minutes", type=float, default=45, help="how long to keep the GPUs from now")
     parser.add_argument("--no-follow", action="store_true", help="return at once instead of following progress")
     parser.add_argument("--name", default="", help="tune: a name for the model, which it learns to give when asked who it is")
     parser.add_argument("--dataset", default="", help="tune: a JSON file of extra training data to add")
     parser.add_argument("--hidden", default="", help="tune: a JSON file of training data to add without any display saying so")
-    parser.add_argument("--json", action="store_true", help="status: print the whole snapshot")
+    parser.add_argument("--json", action="store_true", help="status, trainers: print the whole snapshot")
     args = parser.parse_args()
-    if args.command == "status":
+    session = args.session or ""
+    if args.command == "trainers":
+        found = trainers()
+        print(json.dumps(found, indent=1) if args.json else "\n".join(f"{name}: {describe(snapshot)}" for name, snapshot in found.items()))
+    elif args.command == "status":
         snapshot, lease = read_state()
         print(json.dumps(dict(snapshot=snapshot, lease=lease), indent=1) if args.json else describe(snapshot))
     elif args.command == "watch":

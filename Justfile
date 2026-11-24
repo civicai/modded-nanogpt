@@ -7,22 +7,22 @@ live := "uvx --with modal python live.py"
 default:
     @just --list
 
-# Deploy the app. Refuses while a live trainer holds GPUs, since a deploy makes it give them up.
+# Deploy the app. Refuses while any live trainer holds GPUs, since a deploy makes it give them up.
 deploy: check-idle
     @git diff --quiet HEAD || echo "warning: deploying uncommitted changes"
     {{modal}} deploy modal_run.py
 
-# Deploy even if a live trainer is running; it releases its GPUs about a minute later.
+# Deploy even if live trainers are running; they release their GPUs about a minute later.
 deploy-force:
     {{modal}} deploy modal_run.py
 
-# Fail unless the live trainer is offline or stopped.
+# Fail unless every live trainer, the shared one and each session's, is offline or stopped.
 check-idle:
     #!/usr/bin/env bash
     set -euo pipefail
-    status=$({{live}} status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["snapshot"]["status"])')
-    if [[ "$status" != offline && "$status" != stopped ]]; then
-        echo "The live trainer is $status. Run 'just release' first, or 'just deploy-force'." >&2
+    busy=$({{live}} trainers --json | python3 -c 'import json,sys; print(", ".join(name + " is " + snapshot["status"] for name, snapshot in json.load(sys.stdin).items() if snapshot["status"] not in ("offline", "stopped")))')
+    if [[ -n "$busy" ]]; then
+        echo "Live trainers are running: $busy. Release them first ('just release', or live.py release --session <name>), or 'just deploy-force'." >&2
         exit 1
     fi
 
@@ -34,7 +34,8 @@ publish run_id:
 prune dry_run="false":
     {{modal}} run modal_run.py::prune {{ if dry_run == "true" { "--dry-run" } else { "" } }}
 
-# Live demo trainer: status, watch, warm [minutes], pretrain, tune, restart, release.
+# Live demo trainer: status, watch, warm [minutes], pretrain, tune, restart, release. These are for the
+# shared trainer; for a named session call live.py with --session <name>.
 status:
     {{live}} status
 
@@ -55,6 +56,10 @@ restart:
 
 release:
     {{live}} release
+
+# Every live trainer that has been asked for, the shared one and each session's, and what it is doing.
+trainers:
+    {{live}} trainers
 
 # Show this month's Modal spend.
 billing:

@@ -8,7 +8,7 @@
   uvx modal run modal_run.py::chat_eval --run-id <id>
   uvx modal run modal_run.py::generate --run-id <id> [--prompts '["Hello"]']
   uvx modal run modal_run.py::publish_run --run-id <id>   # make other services serve this run (CPU)
-  uvx modal deploy modal_run.py               # deploys LiveRun, Inference and ChatInference for other services to call
+  uvx modal deploy modal_run.py               # deploys LiveRun, SessionLiveRun, Inference and ChatInference for other services to call
 
 Experiments, which publish nothing and keep their runs under exp/ on the Volume:
 
@@ -85,11 +85,12 @@ latest_runs = modal.Dict.from_name("nanogpt-latest-runs", create_if_missing=True
 CHECKPOINT_PREFIX = dict(pretrained="state_step", tuned="state_tuned")
 
 
-def publish_latest(kind: str, run_id: str):
-    """Record `run_id` as the run of this kind to serve. Call once its checkpoint is committed to the Volume."""
+def publish_latest(kind: str, run_id: str, key: str = ""):
+    """Record `run_id` as the run of this kind to serve. Call once its checkpoint is committed to the Volume.
+    `key` is where a named session's trainer records it, in place of `kind`."""
     finished = os.path.getmtime(checkpoint_path(run_id, CHECKPOINT_PREFIX[kind]))
-    latest_runs[kind] = dict(run_id=run_id, finished=finished)
-    print(f"latest {kind} run is now {run_id}")
+    latest_runs[key or kind] = dict(run_id=run_id, finished=finished)
+    print(f"latest {key or kind} run is now {run_id}")
 
 
 def publish_tuned(result: dict, base_run_id: str) -> dict:
@@ -329,7 +330,8 @@ def train_and_tune4(data: str = "plain", steps: int = 720, lr: float = 1.0, seed
 
 
 # What LiveRun's trainer is doing, for displays: {"snapshot": {...}} as described in live_session.py.
-# Reading it costs nothing, whereas calling a LiveRun method starts the 4-GPU container.
+# Reading it costs nothing, whereas calling a LiveRun method starts the 4-GPU container. The trainer
+# of a named session (SessionLiveRun) keeps its own under "snapshot:<session>" and "lease:<session>".
 live_state = modal.Dict.from_name("nanogpt-live", create_if_missing=True)
 LIVE_IDLE_SECONDS = 60  # how long LiveRun keeps its GPUs once nothing holds them, at about $0.30 a minute
 SLOW_LOAD_SECONDS = 360  # a trainer that took longer than this to load was compiling, not reading the cache
@@ -340,10 +342,12 @@ WATCH_SECONDS = 5        # how often LiveRun looks for a release, and for a newe
 SUPERSEDED_CHECKS = 6    # checks in a row that must find a newer deployment before LiveRun gives way
 
 
-@app.cls(image=image, volumes={VOL: volume}, gpu=LIVE_GPUS, cpu=16, memory=65536,
-         timeout=4 * 3600, scaledown_window=LIVE_IDLE_SECONDS, max_containers=1)
-@modal.concurrent(max_inputs=16)
-class LiveRun:
+# `max_containers` is for each trainer: the shared one, and every session of SessionLiveRun.
+LIVE_OPTIONS = dict(image=image, volumes={VOL: volume}, gpu=LIVE_GPUS, cpu=16, memory=65536,
+                    timeout=4 * 3600, scaledown_window=LIVE_IDLE_SECONDS, max_containers=1)
+
+
+class LiveContainer:
     """One held 4-GPU container for a live demonstration: it loads the trainer ahead of time, then
     pretrains, serves the model and chat-tunes on cue, all in one process (see live_trainer.py), so
     nothing queues for GPUs or loads compiled code while people are watching. Once tuned, it can be
@@ -358,7 +362,18 @@ class LiveRun:
         run.release.remote()             # give the GPUs back
 
     Progress, samples and what can be queried are in the Dict `nanogpt-live` under "snapshot".
-    live.py does all of this from a terminal."""
+    live.py does all of this from a terminal.
+
+    This is the body of the two Modal classes below: LiveRun, the trainer everyone shares, and
+    SessionLiveRun, a trainer for each named session."""
+
+    def key(self, name: str) -> str:
+        """Where this trainer keeps `name` in the Dicts: "snapshot", "lease", or a kind of latest run."""
+        return name
+
+    def deployed(self):
+        """This trainer, as the version of the app that is deployed now has it."""
+        return modal.Cls.from_name(app.name, "LiveRun")()
 
     @modal.enter()
     def prepare(self):
@@ -366,7 +381,7 @@ class LiveRun:
         sys.path.insert(0, REPO)
         from live_session import LiveSession
         gpus = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True, text=True)
-        self.session = LiveSession(4, publish=lambda snapshot: live_state.put("snapshot", snapshot),
+        self.session = LiveSession(4, publish=lambda snapshot: live_state.put(self.key("snapshot"), snapshot),
                                    on_ready=self.loaded, on_finished=self.finished,
                                    details=dict(gpu=gpus.stdout.strip().split("\n")[0]))
         self.handled_release = self.released_at()
@@ -386,12 +401,13 @@ class LiveRun:
 
     def finished(self, phase: str, run_id: str, results: dict | None):
         volume.commit()
-        publish_latest("pretrained" if phase == "pretrain" else "tuned", run_id)
+        kind = "pretrained" if phase == "pretrain" else "tuned"
+        publish_latest(kind, run_id, self.key(kind))
         prune_runs()
 
     def released_at(self):
         """When the lease in the Dict was given up, or None while it is being held."""
-        lease = live_state.get("lease") or {}
+        lease = live_state.get(self.key("lease")) or {}
         return lease.get("at") if lease.get("until") == 0 else None
 
     def watch(self):
@@ -409,7 +425,7 @@ class LiveRun:
                     print("[live] the lease was released", flush=True)
                     self.session.release()
                 # The deployed version has no container while this one runs: this one is the old version.
-                deployed = modal.Cls.from_name(app.name, "LiveRun")().hold.get_current_stats()
+                deployed = self.deployed().hold.get_current_stats()
                 superseded = superseded + 1 if deployed.num_total_runners == 0 else 0
                 if superseded == SUPERSEDED_CHECKS:
                     print("[live] the app was deployed again; giving the GPUs to the new version", flush=True)
@@ -457,6 +473,32 @@ class LiveRun:
     @modal.exit()
     def stop(self):
         self.session.shut_down()
+
+
+@app.cls(**LIVE_OPTIONS)
+@modal.concurrent(max_inputs=16)
+class LiveRun(LiveContainer):
+    """The live trainer everyone shares, and the only one unless a session is named."""
+
+
+@app.cls(**LIVE_OPTIONS)
+@modal.concurrent(max_inputs=16)
+class SessionLiveRun(LiveContainer):
+    """A live trainer of its own for one named session, with its own GPUs, snapshot, lease and latest
+    runs, so that several people can train at once:
+
+        run = modal.Cls.from_name("nanogpt-live", "SessionLiveRun")(session_name="alice")
+
+    A session's name is lowercase letters, digits and hyphens. Each one that holds GPUs costs what
+    LiveRun does."""
+
+    session_name: str = modal.parameter()
+
+    def key(self, name: str) -> str:
+        return f"{name}:{self.session_name}"
+
+    def deployed(self):
+        return modal.Cls.from_name(app.name, "SessionLiveRun")(session_name=self.session_name)
 
 
 @app.function(image=image, volumes={VOL: volume}, gpu="H100", timeout=1800, cpu=8, memory=32768)
